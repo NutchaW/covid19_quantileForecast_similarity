@@ -1,0 +1,377 @@
+---
+title: "Distance as a signal"
+author: "Nutcha Wattanachit, Johannes Bracher, Evan Ray, Nick Reich"
+date: "06/06/2022"
+header-includes:
+   - \usepackage{tabularx}
+   - \usepackage{hyperref}
+   - \usepackage{wrapfig}
+   - \usepackage{float}
+   - \usepackage{colortbl}
+   - \usepackage{pdflscape}
+   - \usepackage{tabu}
+   - \usepackage{xcolor}
+output:
+  pdf_document:
+        latex_engine: xelatex
+        fig_caption: yes
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(energy)
+library(knitr)
+library(data.table)
+library(covidHubUtils)
+library(RColorBrewer)
+library(genlasso)
+#devtools::install_github("reichlab/covidHubUtils",force=TRUE)
+library(epiprocess)
+#devtools::install_github("cmu-delphi/epiprocess",force=TRUE)
+library(lubridate)
+library(zoltr)
+library(igraph)
+library(gtools)
+library(gtable)
+library(gridExtra)
+library(grid)
+library(ggdendro)
+library(gridGraphics)
+knitr::opts_chunk$set(echo=FALSE, comment = FALSE, message=FALSE, 
+                      fig.show= 'hold',fig.pos="H",table.placement="H",
+                      warning =FALSE)
+```
+
+   
+```{r}
+# source function
+source("./functions/distance_func_script.R")
+source("./functions/plot_func.R")
+# set location and targets
+melocs <- read.csv("./data/locations.csv")
+locs <- melocs$location[1:52]
+target_horizon1 <- 1:4
+target_var <- c("inc death")
+
+# read distances
+dist_gen_norepeat <- read.csv("./data/analysis_data/norepeat_distance_all_l.csv") %>%
+  dplyr::mutate(target_end_date = as.Date(target_end_date),
+                location = ifelse(nchar(location)==3,paste0("0",as.numeric(location)),location)) 
+# truth
+truth_death <- read.csv("./data/truth_prefiltered.csv") %>%
+  dplyr::mutate(value=ifelse(value<0,0,value),
+                target_end_date = as.Date(target_end_date)) %>%
+  dplyr::filter(geo_type=="state",
+                location %in% locs) %>%
+  dplyr::filter(target_variable=="inc death") %>%
+  dplyr::filter(target_end_date <= max(dist_gen_norepeat$target_end_date),
+                target_end_date >=  min(dist_gen_norepeat$target_end_date)) 
+```
+
+
+```{r,cache=TRUE}
+scale_full <- dist_gen_norepeat %>%
+  dplyr::mutate(date = (as.Date(target_end_date)+2)-(7*horizon),
+                location=as.character(location),
+                horizon=as.character(horizon)) %>%
+  dplyr::filter(date >= "2020-12-21",
+                target_end_date <= "2021-12-31") %>%
+  dplyr::group_by(date,location) %>%
+  dplyr::filter(n_distinct(horizon)==4) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(approx_cd,horizon,location,date)
+scale_w_na <- scale_full %>%
+  dplyr::group_by(location,date,horizon) %>%
+  dplyr::mutate(approx_cd=filter_lims(approx_cd)) %>%
+  dplyr::ungroup() 
+# add truth death
+truth_death_hr <- truth_death  %>%
+  dplyr::mutate(approx_cd=value,
+                date=target_end_date+2,
+                horizon="incident death") %>%
+  dplyr::filter(target_end_date >= "2020-12-19",
+                target_end_date <= "2021-11-29") %>%
+  dplyr::select(location,date,approx_cd,horizon)
+truth_death_hr <- truth_death_hr[,c(3,4,1,2)]
+scale_boxp <- rbind(scale_w_na,truth_death_hr) 
+```
+
+
+
+```{r, cache=TRUE}
+# selected location without adjustment
+all_locs <- unique(scale_full$location)[-51]
+locs_ord_f <- truth_death_hr %>%
+  dplyr::filter(location %in% all_locs) %>%
+  dplyr::group_by(location) %>%
+  dplyr::filter(approx_cd==max(approx_cd),
+                approx_cd <= 100) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(desc(approx_cd)) %>%
+  dplyr::select(location)  %>%
+  distinct() 
+locs_ord <- truth_death_hr %>%
+  dplyr::filter(location %in% all_locs) %>%
+  dplyr::group_by(location) %>%
+  dplyr::filter(approx_cd==max(approx_cd)) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(desc(approx_cd)) %>%
+  dplyr::select(location)  %>%
+  distinct() 
+locs_ord <- c(locs_ord)[[1]]
+#excl_locs <- locs_ord[c(4,42,45,39,49:50)]
+locs_noadj_t <-  setdiff(locs_ord[c(6,21,31:32)],c(locs_ord_f)[[1]]) # trend filter, log or rate
+locs_noadj_s1 <- setdiff(locs_ord[c(3,7,9:13:14,23,28,36)],c(locs_ord_f)[[1]]) # log spline with spar=0.5
+locs_noadj_s2 <- setdiff(locs_ord[c(1:2,5,8,16,22,43)],c(locs_ord_f)[[1]]) # log spline with spar=0.75
+locs_noadj_s3 <- setdiff(locs_ord[c(15,17:20,24:27,29:30,33,35,37,40:41,46,48)],c(locs_ord_f)[[1]]) # log spline with spar=0.6
+locs_noadj_s4 <- setdiff(locs_ord[c(34,38,44,47)],c(locs_ord_f)[[1]]) # log spline with spar=0.65
+# all plots
+x01 <-rbind(truth_death_hr %>%
+          dplyr::filter(horizon=="incident death") %>% 
+          dplyr::mutate(horizon="truth",type="truth"),
+          scale_full %>%
+          dplyr::group_by(horizon,location,date) %>%
+          dplyr::mutate(approx_cd=median(approx_cd),type="median CD") %>%
+          dplyr::ungroup() %>%
+          distinct()
+          ) %>%
+  dplyr::filter(location %in% locs_noadj_t) %>%
+  dplyr::mutate(adjusted_value=ifelse(horizon=="truth" & approx_cd==0,1,approx_cd),
+                log_adjvalue=log(adjusted_value)) %>%
+  dplyr::group_by(location,date) %>%
+  dplyr::filter(n_distinct(horizon)==5) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(location,horizon,date) %>%
+  dplyr::group_by(horizon,location) %>%
+  dplyr::mutate(trend_filter_log = growth_rate(date, adjusted_value, method = "trend_filter",
+                                 log_scale = TRUE)) %>%
+  dplyr::ungroup() %>%
+  drop_na() %>%
+  pivot_longer(cols = c("approx_cd","trend_filter_log"),
+               names_to = c("Method"),
+               values_to = "value") %>%
+  dplyr::mutate(unit=ifelse(Method=="approx_cd","count","rate"))
+
+x02 <-rbind(truth_death_hr %>%
+          dplyr::filter(horizon=="incident death") %>% 
+          dplyr::mutate(horizon="truth",type="truth"),
+          scale_full %>%
+          dplyr::group_by(horizon,location,date) %>%
+          dplyr::mutate(approx_cd=median(approx_cd),type="median CD") %>%
+          dplyr::ungroup() %>%
+          distinct()
+          ) %>%
+  dplyr::filter(location %in% c(locs_noadj_s1,locs_noadj_s2,
+                                locs_noadj_s3,locs_noadj_s4)) %>%
+  dplyr::mutate(adjusted_value=ifelse(horizon=="truth" & approx_cd==0,1,approx_cd),
+                log_adjvalue=log(adjusted_value)) %>%
+  dplyr::group_by(location,date) %>%
+  dplyr::filter(n_distinct(horizon)==5) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(location,horizon,date) %>%
+  dplyr::group_by(horizon,location) %>%
+  dplyr::mutate(smooth_spline_log = 
+                  ifelse(location %in% locs_noadj_s1,
+                         growth_rate(date, adjusted_value, method = "smooth_spline",spar=0.5),
+                         ifelse(location %in% locs_noadj_s2,
+                         growth_rate(date, adjusted_value, method = "smooth_spline",spar=0.75),
+                         ifelse(location %in% locs_noadj_s3,
+                         growth_rate(date, adjusted_value, method = "smooth_spline",spar=0.6),
+                         growth_rate(date, adjusted_value, method = "smooth_spline",spar=0.65)))
+                    )) %>%
+  dplyr::ungroup() %>%
+  drop_na() %>%
+  pivot_longer(cols = c("approx_cd","smooth_spline_log"),
+               names_to = c("Method"),
+               values_to = "value") %>%
+  dplyr::mutate(unit=ifelse(Method=="approx_cd","count","rate"))
+
+## build plot data
+x <- rbind(x01,x02)
+# truth date
+truth_dates <- truth_death_hr %>%
+  dplyr::filter(date > "2021-07-01") %>%
+  dplyr::group_by(location) %>%
+  dplyr::mutate(peak_date = date[which.max(approx_cd)],
+                start_date = peak_date - (24*7)) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(location,peak_date,start_date) %>%
+  distinct()
+```
+
+
+# Plots - log scale trend filter and smooth spline
+
+```{r}
+for(loc in c(locs_noadj_t,locs_noadj_s1,locs_noadj_s2,locs_noadj_s3,locs_noadj_s4)){
+  p5 <- x %>%
+    dplyr::filter(location == loc, 
+                  horizon %in% c(2,4,"truth"),
+                  unit=="count") %>%
+    ggplot() +
+    geom_line(aes(x = as.Date(date), y = value,col=horizon),na.rm = TRUE) +
+    scale_color_brewer(palette = "Dark2") +
+    facet_grid(type~location, scales = "free_y") +
+    scale_x_date(minor_breaks = "1 month", 
+                 breaks = "2 months", 
+                 date_labels = "%b %y") +
+    labs(x = "Date", y = "value") +
+    theme(legend.position = "bottom",
+          legend.key.size = unit(0.5, 'cm'), #change legend key size
+          legend.title = element_text(size=8), #change legend title font size
+          legend.text = element_text(size=5))
+    p6 <- x %>%
+    dplyr::filter(location == loc,
+                  horizon %in% c(2,4,"truth"),
+                  unit!="count") %>%
+      dplyr::mutate(unit=
+                  ifelse(
+                    Method %in% c("trend_filter_log","smooth_spline_log") & type=="median CD",
+                    "log rate - CD",
+                    "log rate - truth")) %>%
+    ggplot() +
+    geom_line(aes(x = as.Date(date), y = value,linetype=Method,col=horizon),na.rm = TRUE) +
+    scale_color_brewer(palette = "Dark2") +
+    guides(color="none")+
+    facet_grid(unit~location, scales = "free_y") +
+    scale_x_date(minor_breaks = "1 month", 
+                 breaks = "2 months", 
+                 date_labels = "%b %y") +
+    labs(x = "Date", y = "") +
+    theme(legend.position = "bottom",
+          legend.box = "vertical",
+          legend.key.size = unit(0.5, 'cm'), #change legend key size
+          legend.title = element_text(size=8), #change legend title font size
+          legend.text = element_text(size=5))
+  grid.arrange(p5,p6,ncol=2)
+}
+```
+
+## Cross-correlations
+
+### Forecast inclusion criteria
+
+* Targets: 1-4 wk ahead inc death
+* Target End Dates: Jan-Dec 2021 with all 4 horizons.
+* Model: all models submitted on a particular date
+* Probability levels: All
+* Locations: All except US,4,42,45,39,49,50
+
+```{r}
+## make data set
+xt <- x %>%
+  dplyr::left_join(truth_dates, by=c("location"))  %>%
+  dplyr::filter(unit=="rate",
+                type=="median CD") %>% 
+  dplyr::filter(horizon %in% c(2,4),
+                date <= peak_date,
+                date >= start_date) 
+y <- x %>%
+  dplyr::left_join(truth_dates, by=c("location"))%>%
+  dplyr::filter(unit=="rate",
+                type=="truth",
+                date <= peak_date,
+                date >= start_date) %>%
+  dplyr::select(-"horizon") %>%
+  dplyr::distinct() 
+## calculation and plots
+library(astsa)
+ccf_list2 <- ccf_list4 <-  list()
+for(j in 1:length(unique(x$location))){
+  yt <- y %>%
+    dplyr::filter(location==unique(x$location)[j]) %>%
+    dplyr::arrange(date) %>%
+    dplyr::select(value) %>%
+    ts(.)
+  for(i in c(2,4)){
+    assign(paste0("dis_",i),
+           xt %>%
+              dplyr::filter(location==unique(x$location)[j],
+                            horizon==i) %>%
+              dplyr::arrange(date) %>%
+              dplyr::select(value) %>%
+              ts(.)
+           )
+  }
+  # only plot for some
+  #if(loc %in% locs_short[c(1,3,12)]){
+ # lag2.plot(dis_2[,1], yt[,1], 5)[1]
+  lag2.plot(dis_4[,1], yt[,1], 5)[1]
+  #}
+  ccf_list2[[j]] <- ccf(dis_2[,1], yt[,1],plot = FALSE)
+  ccf_list4[[j]] <- ccf(dis_4[,1], yt[,1],plot = FALSE)
+  # plot
+ # ccf(dis_2[,1], yt[,1])
+  plot(ccf_list2[[j]], main = paste0("2 wk ahead - ",unique(x$location)[j]))
+  plot(ccf_list4[[j]], main = paste0("4 wk ahead - ",unique(x$location)[j]))
+}
+```
+
+
+<!-- ```{r} -->
+<!-- ## make data set -->
+<!-- xt <- x %>% -->
+<!--   dplyr::left_join(truth_dates, by=c("location"))  %>% -->
+<!--   dplyr::filter(unit=="rate", -->
+<!--                 type=="median CD") %>%  -->
+<!--   # dplyr::group_by(location) %>% -->
+<!--   # dplyr::mutate(trend = stl(value, s.window = "periodic")$time.series[,2], -->
+<!--   #               detrend_ts = value - (trend - trend[1])) %>% -->
+<!--   # dplyr::ungroup() %>% -->
+<!--   dplyr::filter(horizon %in% c(2,4), -->
+<!--                 date <= peak_date, -->
+<!--                 date >= start_date)  -->
+<!-- # %>% -->
+<!-- #   dplyr::group_by(location) %>% -->
+<!-- #   dplyr::mutate(trend = stl(demand, s.window = "periodic")$time.series[,2], -->
+<!-- #                 detrend_ts = demand - (trend - trend[1])) -->
+<!-- y <- x %>% -->
+<!--   dplyr::left_join(truth_dates, by=c("location"))%>% -->
+<!--   dplyr::filter(unit=="count", -->
+<!--                 type=="truth", -->
+<!--                 date <= peak_date, -->
+<!--                 date >= start_date) %>% -->
+<!--   dplyr::select(-"horizon") %>% -->
+<!--   dplyr::distinct()  -->
+<!-- ## calculation and plots -->
+<!-- library(astsa) -->
+<!-- ccf_list2 <- ccf_list4 <-  list() -->
+<!-- for(j in 1:length(unique(x$location))){ -->
+<!--   yt <- y %>% -->
+<!--     dplyr::filter(location==unique(x$location)[j]) %>% -->
+<!--     dplyr::arrange(date) %>% -->
+<!--     dplyr::select(value) %>% -->
+<!--     ts(.) -->
+<!--   for(i in c(2,4)){ -->
+<!--     assign(paste0("dis_",i), -->
+<!--            xt %>% -->
+<!--               dplyr::filter(location==unique(x$location)[j], -->
+<!--                             horizon==i) %>% -->
+<!--               dplyr::arrange(date) %>% -->
+<!--               dplyr::select(value) %>% -->
+<!--               ts(.) -->
+<!--            ) -->
+<!--   } -->
+<!--   # only plot for some -->
+<!--   #if(loc %in% locs_short[c(1,3,12)]){ -->
+<!--   # lag2.plot(dis_2[,1], truth_2[,1], 0)[1] -->
+<!--   # lag2.plot(dis_4[,1], truth_4[,1], 0)[1] -->
+<!--   #} -->
+<!--   ccf_list2[[j]] <- ccf(dis_2[,1], yt[,1],plot = FALSE) -->
+<!--   ccf_list4[[j]] <- ccf(dis_4[,1], yt[,1],plot = FALSE) -->
+<!--   # plot -->
+<!--  # ccf(dis_2[,1], yt[,1]) -->
+<!--   plot(ccf_list2[[j]], main = paste0("2 wk ahead - ",unique(x$location)[j])) -->
+<!--   plot(ccf_list4[[j]], main = paste0("4 wk ahead - ",unique(x$location)[j])) -->
+<!-- } -->
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- #plot  -->
+<!-- for(k in 1:length(unique(x$location))){ -->
+<!--   ggplot() + -->
+<!--     geom_ -->
+<!--   ccf_list2[[k]]$acf -->
+<!-- } -->
+<!-- ``` -->

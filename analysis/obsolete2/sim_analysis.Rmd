@@ -1,0 +1,753 @@
+---
+title: "COVID-19 Forecast Similarity Analysis"
+author: "Johannes Bracher, Evan Ray, Nick Reich, Nutcha Wattanachit"
+date: "03/10/2022"
+header-includes:
+   - \usepackage{tabularx}
+   - \usepackage{hyperref}
+   - \usepackage{wrapfig}
+   - \usepackage{float}
+   - \usepackage{colortbl}
+   - \usepackage{pdflscape}
+   - \usepackage{tabu}
+   - \usepackage{xcolor}
+output:
+  pdf_document:
+        latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(energy)
+library(knitr)
+library(data.table)
+library(covidHubUtils)
+library(RColorBrewer)
+#devtools::install_github("reichlab/covidHubUtils",force=TRUE)
+library(lubridate)
+library(zoltr)
+library(igraph)
+library(gtools)
+library(gtable)
+library(gridExtra)
+library(grid)
+library(ggdendro)
+library(gridGraphics)
+knitr::opts_chunk$set(echo=FALSE,
+                       comment = FALSE, message=FALSE, fig.show= 'hold',fig.pos="H",table.placement="H",
+                       fig.align = 'center',warning =FALSE)
+```
+
+
+# Forecast inclusion criteria
+
+* Targets: 1-4 wk ahead inc death
+* Target End Dates: varying sets depending on the analyses
+* Probability levels: All 
+* Locations: 3 states with large cumulative deaths by target end date Feb 5th, 2022 and US National: FL, TX, CA, US
+   
+```{r}
+# source function
+source("./functions/distance_func_script.R")
+source("./functions/decomposition.R")
+source("./functions/plot_func.R")
+# set location and targets
+locs <- c("06","48","12", "US")
+target_horizon1 <- 1:4
+target_horizon2 <- 1:28
+target_var <- c("inc death","inc hosp")
+# read stat
+zdat_d <- read.csv("./data/filtered_df_stats.csv")
+zdat_h <- read.csv("./data/filtered_hf_stats.csv")
+# get death forecast data
+death_datp <- read.csv("./data/formatted_df_stats.csv") 
+d_names<- colnames(death_datp)[8:length(death_datp)]
+death_dat <- death_datp %>%
+  select(c(colnames(death_datp)[1:7],d_names[2:4],d_names[7:9],d_names[12]))
+death_dat_ens <- read.csv("./data/formatted_df_ens.csv") 
+# get hosp forecast data
+hosp_dat <- read.csv("./data/formatted_hf_stats.csv")
+h_names<- colnames(hosp_dat)[8:length(hosp_dat)]
+hosp_dat_ens <- read.csv("./data/formatted_hf_ens.csv")
+metadat <- read.csv("./data/metadata.csv")
+# truth
+truth_dat <- read.csv("./data/truth_prefiltered.csv") %>%
+  dplyr::filter(geo_type=="state",
+                location %in% locs) %>%
+  dplyr::mutate(value=ifelse(value<0,0,value))
+truth_death <- truth_dat %>%
+  dplyr::filter(target_variable=="inc death") %>%
+  dplyr::filter(target_end_date <= max(death_dat_ens$target_end_date) &
+                target_end_date >=  min(death_dat_ens$target_end_date)) 
+truth_hosp <- truth_dat %>%
+  dplyr::filter(target_variable=="inc hosp") %>%
+  dplyr::filter(target_end_date <= max(hosp_dat_ens$target_end_date) &
+                target_end_date >=  min(hosp_dat_ens$target_end_date)) 
+```
+
+## Examples of forecasts and Cramer distances
+
+```{r,cache=TRUE}
+# change dates
+# proof of concept
+fdat <- load_forecasts(models = c("COVIDhub-baseline","Karlen-pypm"),
+                              dates = c("2021-04-08", "2021-06-14"),
+                              source = "zoltar",
+                              date_window_size = 6,
+                              locations = "US",
+                              types = c("quantile", "point"),
+                              verbose = FALSE,
+                              targets = paste(1:4, "wk ahead inc death"))
+
+pd <- plot_forecasts(fdat,
+               target_variable = "inc death",
+               truth_source = "JHU",
+               intervals = c(.95),
+               facet = model~.,
+               fill_by_model = TRUE,
+               facet_ncol=1,
+               plot=FALSE,
+               title="none",
+               subtitle="none",
+               show_caption=FALSE)
+
+p_formatted <- pd +
+  scale_x_date(name=NULL, date_breaks = "1 months", date_labels = "%b-%y",
+               limits = c(as.Date("2021-01-30"), as.Date("2021-11-06")))+
+  theme(axis.text.x = element_text(angle=90, hjust=-0.2),
+        legend.position = "none")
+
+for(i in 1:4){
+    p <-  death_dat %>%
+      dplyr::filter(horizon==i,
+                    target_end_date==as.Date("2021-06-19")+(7*(i-1)),
+                    location=="US")  %>%
+      .[,grep("COVIDhub.baseline|Karlen.pypm|quantile",colnames(death_dat))]
+    assign(paste0("p",i),
+           plot_step(p,"COVIDhub.baseline","Karlen.pypm",i)
+           )
+}
+legend = gtable_filter(ggplot_gtable(ggplot_build(p1)), "guide-box")
+
+### hosp
+fdat2 <- load_forecasts(models = c("COVIDhub-baseline","JHUAPL-Bucky"),
+                              dates = c("2021-02-08"),
+                              source = "zoltar",
+                              date_window_size = 6,
+                              locations = "US",
+                              types = c("quantile", "point"),
+                              verbose = FALSE,
+                              targets = paste(1:7, "day ahead inc hosp"))
+
+pm <- plot_forecasts(fdat2,
+               target_variable = "inc hosp",
+               truth_source = "HealthData",
+               intervals = c(.95),
+               facet = model~.,
+               fill_by_model = TRUE,
+               facet_ncol=1,
+               plot=FALSE,
+               title="none",
+               subtitle="none",
+               show_caption=FALSE)
+
+p_formatted2 <- pm +
+  scale_x_date(name=NULL, date_breaks = "1 months", date_labels = "%b-%y",
+               limits = c(as.Date("2021-02-02"), as.Date("2021-04-26")))+
+  theme(axis.text.x = element_text(angle=90, hjust=-0.2),
+        legend.position = "none")
+
+for(i in 1:7){
+    p <-  hosp_dat %>%
+      dplyr::filter(horizon==i,
+                    target_end_date==as.Date("2021-02-09")+((i-1)),
+                    location=="US")  %>%
+      .[,grep("COVIDhub.baseline|JHUAPL.Bucky|quantile",colnames(hosp_dat))]
+    assign(paste0("pm",i),
+           plot_step(p,"COVIDhub.baseline","JHUAPL.Bucky",i)
+           )
+}
+legend2 = gtable_filter(ggplot_gtable(ggplot_build(pm1)), "guide-box")
+```
+
+```{r concept,fig.align='center',out.width='80%',out.height='80%'}
+# grid.arrange(p_formatted,p1,p2,p3,p4, layout_matrix = lay)
+grid.arrange(p_formatted, 
+             arrangeGrob(p1 + theme(legend.position="none"),
+                         p2 + theme(legend.position="none"), 
+                         p3 + theme(legend.position="none"),
+                         p4 + theme(legend.position="none"),
+                         legend,
+                         heights=c(1,1,1,1, 0.3),
+                         ncol = 1),
+             ncol=2,top = "Location: US, Forecast date: 2021-04-08, 2021-06-14")
+```
+
+
+```{r,fig.align='center',out.width='80%',out.height='80%',include=FALSE}
+# grid.arrange(p_formatted,p1,p2,p3,p4, layout_matrix = lay)
+grid.arrange(p_formatted2, 
+             arrangeGrob(pm1 + theme(legend.position="none"),
+                         pm2 + theme(legend.position="none"), 
+                         pm3 + theme(legend.position="none"),
+                         pm4 + theme(legend.position="none"),
+                         pm5 + theme(legend.position="none"),
+                         # pm6 + theme(legend.position="none"),
+                         # pm7 + theme(legend.position="none"),
+                         legend2,
+                         heights=c(1,1,1,1,1, 0.3),
+                         ncol = 1),
+             ncol=2,top = "Location: US, Forecast date: 2021-02-08")
+```
+
+
+## Overall similarity by horizon
+
+```{r,cache=TRUE}
+# set quantiles
+q_set <- unique(death_dat$quantile) 
+#--------------- death forecasts calculation----------------------#
+approx_cd_list_d <-  suppressWarnings(
+  build_distance_frame(death_dat,
+                       horizon_list=target_horizon1,
+                       target_list=target_var[1],
+                       approx_rule="trapezoid_riemann",
+                       tau_F=q_set,tau_G=q_set,
+                       truth=truth_death,scale=FALSE))
+
+#--------------- case forecast calculation----------------------#
+approx_cd_list_h <-  suppressWarnings(build_distance_frame(hosp_dat,
+                                        horizon_list=target_horizon2,
+                                        target_list=target_var[2],
+                                        approx_rule="trapezoid_riemann",
+                                        tau_F=q_set,tau_G=q_set,
+                                        truth=truth_hosp,scale=FALSE))
+#check <- approx_cd_list_d[[3]]
+# decomposition
+decom_list_d <- death_dat %>%
+  dplyr::mutate(location=as.character(location)) %>%
+  decomp_wrapper(., 
+                 horizon_list=c(1:4),
+                 target_list="inc death")
+```
+
+
+```{r cat,fig.align='center',out.width='80%',out.height='70%'}
+#catbox_plot3(cd_box, "Scaled Mean Approx. CD of Inc Death Forecasts\n by Horizon")
+#- we say this is okay to do because we are not comparing across time,and we are not comparing models to models
+# thus model a's diff from model b being large at a particular time doesn't affect what we are saying since that 
+# particular time is the same for all horizon
+catbox_horizon(approx_cd_list_d[[3]], "Approx. CD of Inc Death Forecasts by Horizon",hosp=FALSE)
+stack_plot(decom_list_d[[2]], NULL, NULL, by_date=FALSE)
+#catbox_horizon(approx_cd_list_h[[3]], "Approx. CD of Inc Hosp Forecasts by Grouped Horizon",hosp=TRUE)
+```
+- Most of the distance comes from the the mean across all horizons, except for 1 wk ahead for US.
+- Each component looks proportional across horizon, strange? 
+
+## Mean forecast similarity relative to baseline
+
+For each model-location-horizon-target_end_date, I calculate the mean of approx. CD of that model to all other models, except baseline (mean of all the pairwise distances with that model as one of the pair). Now we have a mean of CD between one model to all other models for each models, then we scale them by dividing by the mean of CD between baseline to all other models. 
+
+The interpretation is a little tricky.
+- If we see the value around 1, we can say that the mean distance of model A to other models is similar to the mean distance of baseline to other models. 
+- Less than 1 implies the mean distance of model A to other models is less than that of baseline to other models (model A is more similar to other models relative to baseline's similarity to others). 
+- Higher than 1 implies model A is less similar to others relative to baseline's similarity to others.
+
+```{r}
+# make scaled dis
+cd_box <- scaled_dis(approx_cd_list_d)
+```
+
+```{r catd,fig.align='center',out.width='80%',out.height='70%'}
+# can compare model, but not across horizon
+# distance model A from other models, relative to distance of baseline from other models
+# we can also do dist from model a to ensemble relative to baseline to ensemble
+catbox_plot3(cd_box,
+             "Scaled Mean Approx. CD of Inc Death Forecasts - 1 Wk Ahead Horizon", h=1)
+catbox_plot3(cd_box,
+             "Scaled Mean Approx. CD of Inc Death Forecasts - 2 Wk Ahead Horizon", h=2)
+catbox_plot3(cd_box,
+             "Scaled Mean Approx. CD of Inc Death Forecasts - 3 Wk Ahead Horizon", h=3)
+catbox_plot3(cd_box,
+             "Scaled Mean Approx. CD of Inc Death Forecasts - 4 Wk Ahead Horizon", h=4)
+```
+- The results look pretty similar across all horizons, but there are differences across locations in each horizon.
+- Seeing CEID-walk around 1 with low-ish variation may be encouraging? It's a non-epi model and the similarity to others is about the same relative to baseline. 
+- RW-ESG is categorized as stats model, but it is more similar to others relative to baseline (but the range is pretty big). 
+- There is high variation in the similarity between Karlen-pypm and other models relative to baseline's similarity to others. 
+- Ensemble is more similar to other models compared to baseline's similarity to other models across all horizon-location pair.
+
+```{r cath,fig.align='center',out.width='80%',out.height='70%',include=FALSE, eval=FALSE}
+cd_box2 <- scaled_dis(approx_cd_list_h)
+# hosp
+catbox_plot3(cd_box2,
+             "Scaled Mean Approx. CD of Inc Hosp Forecasts - 1-7 Day Ahead Horizon", h=1, hosp=TRUE)
+catbox_plot3(cd_box2,
+             "Scaled Mean Approx. CD of Inc Hosp Forecasts - 8-14 Day Horizon", h=2, hosp=TRUE)
+catbox_plot3(cd_box2,
+             "Scaled Mean Approx. CD of Inc Hosp Forecasts - 15-21 Day Horizon", h=3, hosp=TRUE)
+catbox_plot3(cd_box2,
+             "Scaled Mean Approx. CD of Inc Hosp Forecasts - 22-28 Day Horizon", h=4, hosp=TRUE)
+```
+
+# Similarity by type
+
+CEID-Walk, RW-ESG, and the baseline are categorized as stats models. Here we plot the distance by date for each location and horizon. We can compare the value vertically (within the same date), but not across the dates since they are pretty much affected by the scale.
+
+```{r}
+#Test here might be possible if carefuflly designed.
+#Scale by baseline within that date by typ
+type_dat1 <- type_dis(approx_cd_list_d,c("CEID.Walk","RobertWalraven.ESG","COVIDhub.baseline"))
+```
+
+```{r tmean,fig.align='center',out.width='80%',out.height='70%'}
+# no ensemble, dont make comparison across time
+line_cd(type_dat1,"Mean Approx. CD of Inc Death Forecasts - CA",loc="06")
+line_cd(type_dat1,"Mean Approx. CD of Inc Death Forecasts - FL",loc="12")
+line_cd(type_dat1,"Mean Approx. CD of Inc Death Forecasts - TX",loc="48")
+line_cd(type_dat1,"Mean Approx. CD of Inc Death Forecasts - US",loc="US")
+```
+```{r}
+decom_list_d[[1]] %>%
+  dplyr::filter(location=="US") %>%
+  stack_plot(., "COVIDhub.baseline", "Karlen.pypm", by_date=TRUE)
+```
+
+- We don't see clear differences at any particular time in CA, but we do for other locations
+- For FL, stats-pair dissimilarity is high compared to other at times when we observed an increase in death. This might be from RW-ESG since we see that (though not directly) from the box plot - and we have less stats models, so it's more pronounced.
+- For US, we see a lot of dissimilarity among stat-epi pairs and between stats pairs at the downward slope after winter wave. At the upward slope in the fall, we see a lot of dissimilarity among epi-pair and stat-epi-pair (does this just imply epi models saying different things?) at 3- and 4-wk ahead horizons (compared to stats pair that seem to agree with each other in that period of time).
+- Decomposition for the US between baseline (F) and Karlen-pypm (G), at the downward slope after the peak, baseline model mean being larger than Karlen's mean accounts for most of their dissimilarity. At the beginning of the fall peak, Karlen's mean being larger accounting for most of their dissimilarity. During the flat period, we see differences in their dispersion comes into play.
+
+
+```{r tmeanhist,fig.align='center',out.width='80%',out.height='70%',include=FALSE, eval=FALSE}
+# no ensemble
+hist_cd(type_dat1,"Mean Approx. CD of Inc Death Forecasts - CA","06")
+hist_cd(type_dat1,"Mean Approx. CD of Inc Death Forecasts - FL","12")
+hist_cd(type_dat1,"Mean Approx. CD of Inc Death Forecasts - TX","48")
+hist_cd(type_dat1,"Mean Approx. CD of Inc Death Forecasts - US","US")
+```
+
+
+```{r}
+#Scale by baseline within that date by typ
+type_dat2 <- type_dis(approx_cd_list_h,c("JHUAPL.Gecko","COVIDhub.baseline"))
+```
+
+```{r tmean2,fig.align='center',out.width='80%',out.height='70%',include=FALSE, eval=FALSE}
+# no ensemble
+line_cd(type_dat2,"Mean Approx. CD of Inc Hosp Forecasts - CA","06", hosp=TRUE)
+line_cd(type_dat2,"Mean Approx. CD of Inc Hosp Forecasts - FL","12", hosp=TRUE)
+line_cd(type_dat2,"Mean Approx. CD of Inc Hosp Forecasts - TX","48", hosp=TRUE)
+line_cd(type_dat2,"Mean Approx. CD of Inc Hosp Forecasts - US","US", hosp=TRUE)
+```
+
+```{r tmean2hist,fig.align='center',out.width='80%',out.height='70%',include=FALSE, eval=FALSE}
+# no ensemble
+hist_cd(type_dat2,"Mean Approx. CD of Inc Hosp Forecasts - CA","06", hosp=TRUE)
+hist_cd(type_dat2,"Mean Approx. CD of Inc Hosp Forecasts - FL","12", hosp=TRUE)
+hist_cd(type_dat2,"Mean Approx. CD of Inc Hosp Forecasts - TX","48", hosp=TRUE)
+hist_cd(type_dat2,"Mean Approx. CD of Inc Hosp Forecasts - US","US", hosp=TRUE)
+```
+
+```{r}
+### US plot
+tplot1_us <- load_forecasts(models = c("COVIDhub-4_week_ensemble","COVIDhub-baseline"),
+                        dates = c("2021-08-09"),
+                        source = "zoltar",
+                        date_window_size = 6,
+                        locations = "US",
+                        types = c("quantile", "point"),
+                        verbose = FALSE,
+                        targets = paste(1:4, "wk ahead inc death"))
+
+tplot2_us <- plot_forecasts(tplot1_us,
+               target_variable = "inc death",
+               truth_source = "JHU",
+               intervals = c(.95),
+#               facet = location~.,
+               fill_by_model = TRUE,
+               facet_ncol=1,
+               plot=FALSE,
+               title="none",
+               subtitle="none",
+               show_caption=FALSE)
+
+tplotUS <- tplot2_us +
+  scale_x_date(name=NULL, date_breaks = "1 months", date_labels = "%b-%y",
+               limits = c(as.Date("2021-02-02"), as.Date("2021-12-06"))
+               )+
+  theme(axis.text.x = element_text(angle=90, hjust=-0.2),
+        legend.position = "none")
+
+# state plot
+tplot1 <- load_forecasts(models = c("COVIDhub-4_week_ensemble","COVIDhub-baseline"),
+                        dates = c("2021-08-09"),
+                        source = "zoltar",
+                        date_window_size = 6,
+                        locations = locs[locs!="US"],
+                        types = c("quantile", "point"),
+                        verbose = FALSE,
+                        targets = paste(1:4, "wk ahead inc death"))
+
+tplot2 <- plot_forecasts(tplot1,
+               target_variable = "inc death",
+               truth_source = "JHU",
+               intervals = c(.95),
+               facet = location~.,
+               fill_by_model = TRUE,
+               facet_ncol=1,
+               plot=FALSE,
+               title="none",
+               subtitle="none",
+               show_caption=FALSE)
+
+tplot3 <- tplot2 +
+  scale_x_date(name=NULL, date_breaks = "1 months", date_labels = "%b-%y",
+               limits = c(as.Date("2021-02-02"), as.Date("2021-12-06"))
+               )+
+  theme(axis.text.x = element_text(angle=90, hjust=-0.2),
+        legend.position = "none")
+# plot
+#tplot3
+#tplotUS
+```
+
+## Variations in distances from relative to baseline to relative wis
+
+- more disagreement - lower accuracy
+
+```{r}
+# ens_cd <- dis_ens(approx_cd_list_d)
+score <- score_forecasts(zdat_d,
+                truth_dat,
+                return_format = "long",
+                metrics = c("wis"),
+                use_median_as_point = FALSE) %>%
+  dplyr::filter(model %in% c(str_replace(unique(cd_box$model_1),"\\.","-"),"COVIDhub-baseline"),
+                as.Date(target_end_date) %in% as.Date(unique(cd_box$target_end_date)),
+                score_name=="wis") %>%
+  dplyr::group_by(horizon,target_end_date,location)  %>%
+  dplyr::mutate(wis_b = score_value[model=="COVIDhub-baseline"]) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(target_end_date = as.Date(target_end_date),
+                rel_wis = score_value/wis_b) 
+# check correlation  
+ens_cdc <- cd_box %>%
+  dplyr::mutate(model = str_replace(model_1,"\\.","-")) %>%
+  dplyr::left_join(score,by=c("model","location","horizon","target_end_date")) %>%
+  dplyr::group_by(horizon,target_end_date,location)  %>%
+  dplyr::mutate(mwis = mean(rel_wis),
+                sd_cd=sd(mean_scale)) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(location,target_end_date, horizon,mwis,sd_cd) %>%
+  distinct() %>%
+  dplyr::group_by(horizon,location) %>%
+  dplyr::mutate(corrl=cor(sd_cd, mwis,  method = "pearson", use = "complete.obs")) %>%
+  dplyr::ungroup() 
+# for plot
+cor_dat <- ens_cdc %>%
+  dplyr::select("corrl","location","horizon") %>%
+  distinct()
+```
+
+```{r,out.width='80%',out.height='70%'}
+ggplot(cor_dat)+
+  geom_bar(aes(x=horizon,y=corrl,fill=location),
+           position="dodge",stat="identity") +
+  theme_bw()
+```
+- for each horizon,location, end_date, calculate the mean of each model's cd to other models (except baseline) and divide by mean of baseline's cd to other models and use as a scaled cd for that model. So, we have all models' mean scaled cds at each horizon,location, end_date. Then find standard error of the means for each horizon, location, end date. Then find correlation between SE and wis relative to baseline. 
+- the more models disagreeing with others relative to baseline's disagreement with others (higher variation in distances), the higher wis are relative to baseline (they are less accurate compared to baseline)...what does this mean?
+- disagreement is the varying degree to which model A,model B, .... are dissimilar to others compared to the degree baseline is dissimilar to others. 
+
+## Phase analysis (peak and valleys and flat)
+
+Do it for TX,FL, US since they have discernable peaks. Look at the red line for reference points.
+
+
+```{r}
+# get dates
+us_dates <- c(as.Date("2021-04-17"),as.Date("2021-07-24"),as.Date("2021-09-25"))
+fl_dates <- c(as.Date("2021-04-10"),as.Date("2021-07-17"),as.Date("2021-09-18"))
+tx_dates <- c(as.Date("2021-04-17"),as.Date("2021-07-24"),as.Date("2021-10-16"))
+# define interesting periods
+tplot_fl <- load_forecasts(models = c("Karlen-pypm","COVIDhub-baseline"),
+                        dates = fl_dates+2,
+                        source = "zoltar",
+                        date_window_size = 6,
+                        locations = locs[!locs %in% c("US","06","48")],
+                        types = c("quantile", "point"),
+                        verbose = FALSE,
+                        targets = paste(1:4, "wk ahead inc death"))
+
+tplot_fl2 <- plot_forecasts(tplot_fl,
+               target_variable = "inc death",
+               truth_source = "JHU",
+               intervals = c(.95),
+               facet = location~.,
+               fill_by_model = TRUE,
+               facet_ncol=1,
+               plot=FALSE,
+               title="none",
+               subtitle="none",
+               show_caption=FALSE)
+
+tplot_fl3 <- tplot_fl2 +
+  scale_x_date(name=NULL, date_breaks = "1 months", date_labels = "%b-%y",
+               limits = c(as.Date("2021-02-02"), as.Date("2021-12-06"))
+               )+
+  theme(axis.text.x = element_text(angle=90, hjust=-0.2),
+        legend.position = "none")
+# make seprate plot
+tplot_tx <- load_forecasts(models = c("Karlen-pypm","COVIDhub-baseline"),
+                        dates = tx_dates+2,
+                        source = "zoltar",
+                        date_window_size = 6,
+                        locations = locs[!locs %in% c("US","06","12")],
+                        types = c("quantile", "point"),
+                        verbose = FALSE,
+                        targets = paste(1:4, "wk ahead inc death"))
+
+tplot_tx2 <- plot_forecasts(tplot_tx,
+               target_variable = "inc death",
+               truth_source = "JHU",
+               intervals = c(.95),
+               facet = location~.,
+               fill_by_model = TRUE,
+               facet_ncol=1,
+               plot=FALSE,
+               title="none",
+               subtitle="none",
+               show_caption=FALSE)
+
+tplot_tx3 <- tplot_tx2 +
+  scale_x_date(name=NULL, date_breaks = "1 months", date_labels = "%b-%y",
+               limits = c(as.Date("2021-02-02"), as.Date("2021-12-06"))
+               )+
+  theme(axis.text.x = element_text(angle=90, hjust=-0.2),
+        legend.position = "none")
+# make seprate plot
+tplot_us <- load_forecasts(models = c("Karlen-pypm","COVIDhub-baseline"),
+                        dates = us_dates+2,
+                        source = "zoltar",
+                        date_window_size = 6,
+                        locations = locs[!locs %in% c("48","06","12")],
+                        types = c("quantile", "point"),
+                        verbose = FALSE,
+                        targets = paste(1:4, "wk ahead inc death"))
+
+tplot_us2 <- plot_forecasts(tplot_us,
+               target_variable = "inc death",
+               truth_source = "JHU",
+               intervals = c(.95),
+               facet = location~.,
+               fill_by_model = TRUE,
+               facet_ncol=1,
+               plot=FALSE,
+               title="none",
+               subtitle="none",
+               show_caption=FALSE)
+
+tplot_us3 <- tplot_us2 +
+  scale_x_date(name=NULL, date_breaks = "1 months", date_labels = "%b-%y",
+               limits = c(as.Date("2021-02-02"), as.Date("2021-12-06"))
+               )+
+  theme(axis.text.x = element_text(angle=90, hjust=-0.2),
+        legend.position = "none")
+```
+
+
+```{r truth_line,fig.align='center',out.width='60%',out.height='50%'}
+# plot
+tplot_us3 +
+  geom_vline(aes(xintercept=as.Date("2021-07-24")),color="red")+
+  geom_vline(aes(xintercept=as.Date("2021-09-25")),color="red")+
+  geom_vline(aes(xintercept=as.Date("2021-04-17")),color="red")
+tplot_fl3 +
+  geom_vline(aes(xintercept=as.Date("2021-07-17")),color="red")+
+  geom_vline(aes(xintercept=as.Date("2021-09-18")),color="red")+
+  geom_vline(aes(xintercept=as.Date("2021-04-10")),color="red")
+tplot_tx3 +
+  geom_vline(aes(xintercept=as.Date("2021-07-24")),color="red")+
+  geom_vline(aes(xintercept=as.Date("2021-10-16")),color="red")+
+  geom_vline(aes(xintercept=as.Date("2021-04-17")),color="red")
+```
+
+```{r}
+# type for deaths
+s_list <- c("CEID.Walk","RobertWalraven.ESG","COVIDhub.baseline")
+dphase <- approx_cd_list_d[[1]] %>%
+  dplyr::filter(location %in% c("US","12","48"),
+                target_end_date %in% ifelse(location=="US", 
+                                            as.Date(unlist(lapply(us_dates,function(x) x+(c(1:4)*7))),origin="1970-01-01"),
+                                            ifelse(location=="12",
+                                                   as.Date(unlist(lapply(fl_dates,
+                                                                         function(x) x+(c(1:4)*7))),origin="1970-01-01"),
+                                                   as.Date(unlist(lapply(tx_dates,
+                                                                         function(x) x+(c(1:4)*7))),origin="1970-01-01"))
+                                            )
+                ) %>%
+  # add date type 
+  dplyr::mutate(phase=ifelse(target_end_date<as.Date("2021-06-01"),
+                             "flat",
+                             ifelse(target_end_date>as.Date("2021-06-01") & target_end_date>as.Date("2021-09-18"),
+                                    "up",
+                                    "postpeak")
+                             ),
+                  # add fdate with is the target date of the week forecaster see
+                  fdate = as.Date(target_end_date-(horizon*7))
+                ) %>%
+    dplyr::filter(fdate %in% ifelse(location=="US",
+                                    us_dates,
+                                    ifelse(location=="12",
+                                           fl_dates,
+                                           tx_dates)
+                                    )
+                ) 
+
+
+dphase_type <- approx_cd_list_d[[2]] %>%
+  dplyr::filter(location %in% c("US","12","48"),
+                target_end_date %in% ifelse(location=="US", 
+                                            as.Date(unlist(lapply(us_dates,function(x) x+(c(1:4)*7))),origin="1970-01-01"),
+                                            ifelse(location=="12",
+                                                   as.Date(unlist(lapply(fl_dates,
+                                                                         function(x) x+(c(1:4)*7))),origin="1970-01-01"),
+                                                   as.Date(unlist(lapply(tx_dates,
+                                                                         function(x) x+(c(1:4)*7))),origin="1970-01-01"))
+                                            )
+                ) %>%
+  # add date type 
+  dplyr::mutate(phase=ifelse(target_end_date<as.Date("2021-06-01"),
+                             "flat",
+                             ifelse(target_end_date>as.Date("2021-06-01") & target_end_date>as.Date("2021-09-18"),
+                                    "up",
+                                    "postpeak")
+                             ),
+                  # add fdate with is the target date of the week forecaster see
+                  fdate = as.Date(target_end_date-(horizon*7))
+                ) %>%
+    dplyr::filter(fdate %in% ifelse(location=="US",
+                                    us_dates,
+                                    ifelse(location=="12",
+                                           fl_dates,
+                                           tx_dates)
+                                    )
+                ) %>%
+  # get dis from same type and dis from diff type from other models
+  type_dis_phase(.,s_list)
+```
+
+```{r phasediff,fig.align='center',out.width='60%',out.height='50%'}
+# plot approx cd by horizon location and phase for each model
+box_phase(dphase,"US")
+box_phase(dphase,"12")
+box_phase(dphase,"48")
+# plot by pair type mean for each horizon lcoation and phase
+```
+
+- probably should change the plots' x axis for FL since the up phase stretch the scale.
+- The plots with models show each model's average similarity to other models.
+- We see differences at each phases in each location - a lot to unpack here later
+
+```{r phasediffgroup,fig.align='center',out.width='60%',out.height='50%'}
+# plot approx cd by horizon location and phase for each model
+box_type_phase(dphase_type,"US")
+box_type_phase(dphase_type,"12")
+box_type_phase(dphase_type,"48")
+# plot by pair type mean for each horizon lcoation and phase
+```
+
+- In TX, stats-epi pairs' dissimilarity is high when we are in the upward slope phase of the pandemic. Epi models show sign of confusion post peak (downward slope) 
+- In FL, high variation in similarity among epi models when the death numbers are stable, strange?
+
+## Consistancy (Dissimilarity and COVID-19 characteristics)
+
+Consistency of forecast sequences (forecasts from the same model at different horizons made for the same  target end date) using the divergence index (based on cramer distance) proposed by Richarson et al. (2020). The difference between two forecasts made on consecutive weeks and valid for the same time is
+
+$$
+D_{enddate=t,h}=cd(F_{enddate=t,h+1},F_{enddate=t,h}), h=1,2,3
+$$
+
+Divergence index is
+
+$$
+DI_{enddate=t}=\frac{1}{3}(\sum^{3}_{h=1} D_{enddate=t,h}-cd(F_{enddate=t,3},F_{enddate=t,1}))
+$$
+
+
+
+
+```{r index,fig.align='center',out.width='60%',out.height='50%'}
+# plot approx cd by horizon location and phase for each model
+# plot by pair type mean for each horizon lcoation and phase
+```
+<!-- ### Hierarchical clustering based on mean approx. CD across all weeks and locations -->
+
+<!-- ```{r} -->
+<!-- # create pairwise matrix -->
+<!-- d_frame_mean <- lapply(1:4, function(x) cd_matrix(approx_cd_list_d[[3]],x)) -->
+<!-- ``` -->
+
+<!-- ```{r,fig.cap="High Case Count Locations",fig.height=4} -->
+<!-- #for(i in 1:4){ -->
+<!--     # assign(paste0("dpd_",i), -->
+<!--     #        dendro_plot(i, "d_frame_mean_low",d_types) -->
+<!--     #          ) -->
+<!--     # assign(paste0("dpl_",i), -->
+<!--     #        dendro_plot(i, "c_frame_mean_low",short_meta_low) -->
+<!--     #          ) -->
+<!--     # assign(paste0("dpdl_",i), -->
+<!--     #        dendro_plot(i, "c_frame_mean_low",short_data_low,FALSE) -->
+<!--     #          ) -->
+<!-- #  }  -->
+<!-- dp_1 <- dendro_plot(1, "d_frame_mean",d_types, 80) -->
+<!-- dp_2 <- dendro_plot(2, "d_frame_mean",d_types, 100) -->
+<!-- dp_3 <- dendro_plot(3, "d_frame_mean",d_types, 120) -->
+<!-- dp_4 <- dendro_plot(4, "d_frame_mean",d_types, 148) -->
+
+<!-- grid.arrange(dp_1,dp_2,dp_3,dp_4,nrow=2) -->
+<!-- #grid.arrange(dpd_1,dpd_2,dpd_3,dpd_4,nrow=2) -->
+
+<!-- ``` -->
+
+<!-- ## Decomposition -->
+
+<!-- This is a trial run of applying decomposition to the actual forecasts. For now, we show the decomposition of the approx. CD between the COVIDhub-ensemble (Model F) and Karlen-pypm (Model G).  -->
+
+<!-- * Both dispersion components seem to play little role in dissimilarity -->
+<!-- * Comparing between forecasts for locations with high deaths vs ones with low deaths, the proportions of decomposition components look about the same, with the upward shift of G relative to F accounting for most of the dissimilarity on average -->
+<!-- * Around Feb 2021 until the end of April 2021, we see the upward shift of F relative to G accounting for most of the dissimilarity during that period. This coincides with the downward slope of observed inc deaths after the peak. More inspection needed to discern more information.  -->
+
+<!-- ```{r, cache=TRUE} -->
+
+<!-- # compare karlen-pypm vs ensemble -->
+<!-- decom_list_h_p <- d_frame %>% -->
+<!--   dplyr::mutate(location=as.character(location)) %>% -->
+<!--   dplyr::left_join(peak_date, by="location") %>% -->
+<!--   dplyr::filter(location %in% c(peak_date$location), -->
+<!--                 as.Date(target_end_date,origin="1970-01-01")==as.Date(fdate_at_peak,origin="1970-01-01")) %>% -->
+<!--   dplyr::select(-"fdate_at_peak") %>% -->
+<!--   decomp_wrapper(.,  -->
+<!--                  horizon_list=c(1:4), -->
+<!--                  target_list="inc death") -->
+<!-- # decom_list_l <- decomp_wrapper(d_frame1,  -->
+<!-- #                              horizon_list=c(1:4), -->
+<!-- #                              target_list="inc death") -->
+<!-- decom_list_h <- d_frame %>% -->
+<!--   dplyr::mutate(location=as.character(location)) %>% -->
+<!--   dplyr::left_join(peak_date, by="location") %>% -->
+<!--   dplyr::filter(location %in% c(peak_date$location)) %>% -->
+<!--   dplyr::select(-"fdate_at_peak") %>% -->
+<!--   decomp_wrapper(.,  -->
+<!--                  horizon_list=c(1:4), -->
+<!--                  target_list="inc death") -->
+<!-- ``` -->
+
+<!-- ```{r decomp,fig.align='center',out.width='95%',out.height='50%'} -->
+<!-- dplot3 <-stack_plot(decom_list_h[[1]], "COVIDhub-baseline", "Karlen-pypm", by_date=TRUE) -->
+<!-- dplot4 <- stack_plot(decom_list_h[[3]], "COVIDhub-baseline", "Karlen-pypm", by_date=FALSE) -->
+
+<!-- grid.arrange(dplot3,dplot4,ncol=2,bottom="Decomposition of approx. CD between COVIDhub-baseline and Karlen-pypm\n - FL") -->
+<!-- # grid.arrange(dplot3,dplot4,ncol=2,bottom="Decomposition of approx. CD between COVIDhub-ensemble and Karlen-pypm\n - AK, HI, ME, VT, WY") -->
+<!-- ``` -->

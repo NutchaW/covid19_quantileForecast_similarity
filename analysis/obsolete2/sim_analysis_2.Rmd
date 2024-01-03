@@ -1,0 +1,793 @@
+---
+title: "COVID-19 Forecast Similarity Analysis"
+author: "Nutcha Wattanachit, Johannes Bracher, Evan Ray, Nick Reich"
+date: "04/28/2022"
+header-includes:
+   - \usepackage{tabularx}
+   - \usepackage{hyperref}
+   - \usepackage{wrapfig}
+   - \usepackage{float}
+   - \usepackage{colortbl}
+   - \usepackage{pdflscape}
+   - \usepackage{tabu}
+   - \usepackage{xcolor}
+output:
+  pdf_document:
+        latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(energy)
+library(knitr)
+library(data.table)
+library(covidHubUtils)
+library(RColorBrewer)
+#devtools::install_github("reichlab/covidHubUtils",force=TRUE)
+library(lubridate)
+library(zoltr)
+library(igraph)
+library(gtools)
+library(gtable)
+library(gridExtra)
+library(grid)
+library(ggdendro)
+library(gridGraphics)
+knitr::opts_chunk$set(echo=FALSE,
+                       comment = FALSE, message=FALSE, fig.show= 'hold',fig.pos="H",table.placement="H",
+                       fig.align = 'center',warning =FALSE)
+```
+
+
+# Forecast inclusion criteria
+
+* Targets: 1-4 wk ahead inc death
+* Target End Dates: Jan-Dec 2021 for general analyses and summer/fall 2021 for the model type comparison.
+* Probability levels: All 
+* Locations: Varies, depending on the analysis
+   
+```{r}
+# source function
+source("./functions/distance_func_script.R")
+source("./functions/decomposition.R")
+source("./functions/plot_func.R")
+# set location and targets
+melocs <- read.csv("./data/locations.csv")
+locs <- melocs$location[1:52]
+target_horizon1 <- 1:4
+target_var <- c("inc death")
+# get death forecast data
+# changemm_dat <- read.csv("./data/change_moment_dat.csv") %>%
+#   dplyr::mutate(target_end_date = as.Date(target_end_date),
+#                 location = ifelse(location>=10,as.character(location),paste0("0",as.character(location))))
+#death_dat_test_long <- read.csv("./data/long_df_test.csv") 
+# get test data for all dates plot
+death_dat_test <- read.csv("./data/formatted_df_test.csv") %>%
+  dplyr::mutate(target_end_date = as.Date(target_end_date),
+                forecast_date = as.Date(forecast_date),
+                location = ifelse(location>=10,as.character(location),paste0("0",as.character(location)))) 
+death_dat_test_dates <- read.csv("./data/formatted_df_test_alldates.csv") %>%
+  dplyr::mutate(target_end_date = as.Date(target_end_date),
+                forecast_date = as.Date(forecast_date),
+                location = ifelse(location>=10,as.character(location),paste0("0",as.character(location)))) 
+death_dat_gen <- read.csv("./data/formatted_df_gen.csv") %>%
+  dplyr::mutate(target_end_date = as.Date(target_end_date),
+                forecast_date = as.Date(forecast_date,"1970-01-01"),
+                location = ifelse(location>=10,as.character(location),paste0("0",as.character(location)))) 
+model_n <- str_replace(colnames(death_dat_test_dates[,c(8:(ncol(death_dat_test_dates)))]),"\\.","-")
+# get metadata
+metadat <- read.csv("./data/metadata.csv") %>%
+  dplyr::filter(model_abbr %in% model_n)
+write.csv(metadat,file = "./data/metadata_test.csv")
+# metadata
+s_list <- c("CEID-Walk","CMU-TimeSeries","COVIDhub-baseline","GT-DeepCOVID","JHU_CSSE-DECOM",
+            "Microsoft-DeepSTIA","MIT_CritData-GBCF","MIT_ISOLAT-Mixtures","MUNI-ARIMA",
+            "RobertWalraven-ESG","UCSB-ACTS","UMich-RidgeTfReg","GT-DeepCOVID","IHME-CurveFit",
+            "DDS-NBDS","UT-Mobility","USC-SI_kJalpha")
+model_names <- str_replace(model_n,"\\.","-")
+
+meta <- metadat %>%
+  dplyr::mutate(type=ifelse(model_abbr %in% s_list,"non_SIR","SIR"),
+                model_abbr=str_replace(model_abbr,"\\-",".")) 
+types <- meta$type
+meta_p <- meta %>%
+  dplyr::select(model_abbr,type) 
+# location limited
+locs_short <- unique(death_dat_test_dates$location)
+
+# read distances
+# dist_gen_norepeat <- read.csv("./data/analysis_data/norepeat_distance_all_l.csv") %>%
+#   dplyr::mutate(target_end_date = as.Date(target_end_date),
+#                 location = ifelse(location>=10,as.character(location),paste0("0",as.character(location)))) 
+dist_gen_norepeat <- read.csv("./data/analysis_data/norepeat_distance_all_l.csv") %>%
+  dplyr::mutate(target_end_date = as.Date(target_end_date),
+                location = ifelse(nchar(location)==3,paste0("0",as.numeric(location)),location)) 
+dist_test_dates <- read.csv("./data/analysis_data/distance_test_all_l.csv") %>%
+  dplyr::mutate(target_end_date = as.Date(target_end_date),
+                location = ifelse(location>=10,as.character(location),paste0("0",as.character(location)))) 
+dist_test_norepeat <- read.csv("./data/analysis_data/norepeat_distance_test_l.csv") %>%
+  dplyr::mutate(target_end_date = as.Date(target_end_date),
+                location = ifelse(location>=10,as.character(location),paste0("0",as.character(location)))) 
+dist_test <- read.csv("./data/analysis_data/distance_test_l.csv") %>%
+  dplyr::mutate(target_end_date = as.Date(target_end_date),
+                location = ifelse(location>=10,as.character(location),paste0("0",as.character(location)))) 
+# truth
+truth_death <- read.csv("./data/truth_prefiltered.csv") %>%
+  dplyr::mutate(value=ifelse(value<0,0,value),
+                target_end_date = as.Date(target_end_date)) %>%
+  dplyr::filter(geo_type=="state",
+                location %in% locs) %>%
+  dplyr::filter(target_variable=="inc death") %>%
+  dplyr::filter(target_end_date <= max(dist_gen_norepeat$target_end_date),
+                target_end_date >=  min(dist_gen_norepeat$target_end_date)) 
+q_set <- unique(death_dat_gen$quantile) 
+```
+
+## Examples of forecasts and Cramer distances - US National 
+
+```{r concept,fig.align='center',out.width='100%',out.height='100%',cache=TRUE}
+concept_plot("US", c("2021-04-05","2021-08-02"),c("COVIDhub-4_week_ensemble", "UMass-MechBayes"),death_dat_gen)
+# concept_plot("13", c("2021-04-05","2021-08-02"),c("GT-DeepCOVID", "UMass-MechBayes"),death_dat_gen)
+```
+# Similarity - 1 and 4 week-ahead horizons
+
+The figure shows log-transformed approximated CD for all 1 and 4 week-ahead forecasts submitted for each target end date in 2021. To avoid overcrowding, the plot only shows every other week across the date range for 4 states and US national. 
+
+```{r,cache=TRUE}
+horiz_dist <- dist_gen_norepeat %>%
+  dplyr::filter(location %in% c("US",locs_short[c(1,4,8,12)]),
+                horizon %in% c(1,4),
+                target_end_date>="2021-01-01",
+                target_end_date<="2021-12-31") %>%
+  dplyr::mutate(forecast_date = (as.Date(target_end_date)+2)-(7*horizon),
+                target_ed=format(as.Date(target_end_date),"%y-%b-%d")) %>%
+  dplyr::group_by(target_end_date,location) %>%
+  dplyr::filter(n_distinct(horizon)==2) %>%
+  dplyr::ungroup() 
+dates_kept <- sort(unique(horiz_dist$target_end_date))[c(TRUE,FALSE)]
+horiz_dist <-horiz_dist %>%
+  dplyr::filter(target_end_date %in% dates_kept) 
+  
+# do this by target horizon
+dist_gen_norepeat_wide <- dist_gen_norepeat %>%
+  dplyr::select(-c("n_dates","target_variable")) %>%
+  dplyr::filter(horizon %in% c(1,4)) %>%
+  pivot_wider(id_cols=c("model_1","model_2","location","target_end_date"),
+              names_from = horizon,values_from = approx_cd) %>%
+  drop_na() %>%
+  dplyr::mutate(Proportion=ifelse(`1` >= `4`, "1-wk ahead > 4-wk ahead","4-wk ahead > 1-wk ahead")) 
+```
+
+```{r box_h,fig.align='center'}
+ggplot(horiz_dist) +
+  geom_boxplot(aes(x=as.factor(target_end_date),y=log(approx_cd),color=as.factor(horizon)),
+               outlier.size = 0.1,
+               lwd=rel(0.4)) +
+  scale_x_discrete(breaks=as.factor(dates_kept[c(TRUE,FALSE,FALSE)]),
+                   labels=format(dates_kept[c(TRUE,FALSE,FALSE)],"%b-%y"))+
+  facet_wrap(~location,nrow=3,scales = "free_y") +
+  ylab("Log-transformed approx. CD")+
+  xlab("Target end date")+
+  scale_color_brewer(palette = "Dark2") +
+  guides(color=guide_legend("Horizon")) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle=-45,hjust = -0.1))
+```
+
+- From eyeballing these panels, we can see that generally forecasts made 4 weeks from the target end date exhibit more dissimilarity in predictive quantiles compared to forecasts made 1 week from the target end dates.
+
+## Proportion of median distances among 4-wk ahead forecasts being higher than median distances among 1-wk ahead forecasts
+
+For each target end date and location, we can compare the median of approximated CD of 4-wk ahead forecasts to that of 1-wk ahead forecasts. For each location, the proportions are calculated based on medians of each end date. All locations are included here.
+
+```{r prop_h,fig.align='center',out.width='70%',out.height='40%'}
+ggplot(dist_gen_norepeat_wide,aes(fill=Proportion, x=location,width=.4)) + 
+    geom_bar(position="fill", stat="count")+
+    scale_y_continuous(labels = scales::percent)+
+    scale_fill_brewer(palette = "Dark2") +
+    ylab("")+
+    theme_bw()+
+    theme(axis.text.x = element_text(angle=90))
+#    scale_fill_viridis(discrete = T) 
+# %>%
+#   dplyr::group_by(location) %>%
+#   dplyr::mutate(prop=sum(higher)/n()) %>%
+#   dplyr::ungroup() %>%
+#   dplyr::select(-c("higher","model_1","model_2",`1`,`4`,"target_end_date")) %>%
+#   dplyr::distinct()
+```
+
+- The proportion of the median of 4-wk ahead CDs being higher than the median of 1-wk ahead CDs (for forecasts of incident death for the same target end date) is higher than vice versa for all locations, which supports the previous observation made from the previous boxplot. Similar to what we observed with WIS degrading at further horizons, models produced less similar forecasts at further horizons.
+
+# Distance/dissimilarity as a signal of a change in trends
+
+We are interested in looking at dissimilarity measure across dates to see if we see any trends prior to a change in observed incident deaths. On the plot are:
+
+- The `growth_1` row is the 1-week absolute growth rate (absolute increase or decrease from previous week) 
+- The `growth_4` row is the 4-week absolute growth rate (absolute increase or decrease from previous 4 weeks) 
+- Scaled CD is defined as $\frac{\text{CD}(\text{baseline},\text{model})}{\text{CD}(\text{baseline},\text{ensemble})}$. This is a measure of how dissimilar a forecast from a model is  to the baseline forecast, relative to how dissimilar a baseline forecast is to the ensemble forecast (the median/central forecast). To state simply, it measures the similarity/dissimilarity of a model's forecast relative to the central forecast (ensemble). 
+- The median scaled CD rows are now plotted by forecast date.
+- The last row is the median of scaled CD at a given target end date. Each point in a line is the CD of forecasts made 1 or 4 weeks prior to the date on the x axis.
+
+Note that the truth for US is divided by a factor of 10 so it can be plotted together with other states. 
+
+```{r,cache=TRUE}
+common_dates <- unique(dist_gen_norepeat_wide$target_end_date) 
+# date and location affects scale
+scale_ov_dis2 <- dist_gen_norepeat %>%
+    dplyr::mutate(forecast_date = (as.Date(target_end_date)+2)-(7*horizon)) %>%
+    dplyr::filter((model_1=="COVIDhub.baseline"|model_2=="COVIDhub.baseline")) %>%
+    dplyr::group_by(location, forecast_date,horizon) %>%
+    dplyr::mutate(base_to_center=approx_cd[(model_1=="COVIDhub.baseline"&model_2=="COVIDhub.4_week_ensemble")|
+                                             (model_1=="COVIDhub.4_week_ensemble"&model_2=="COVIDhub.baseline")]) %>% 
+    dplyr::transmute(scaled_cd=approx_cd/base_to_center,
+                     approx_cd=approx_cd,
+                     location=location,
+                     horizon=horizon,
+                     target_end_date= target_end_date,
+                     model_1=model_1,
+                     model_2=model_2) %>%
+    dplyr::ungroup() %>%
+    dplyr::filter((model_1!="COVIDhub.4_week_ensemble"|model_2!="COVIDhub.4_week_ensemble")) %>%
+    # dplyr::group_by(location, forecast_date, horizon) %>%
+    # dplyr::mutate(scaled_cd=median(approx_cd1)) %>%
+    # dplyr::ungroup() %>%
+    dplyr::select(-c("model_1","model_2")) %>%
+    # distinct(.) %>%
+  dplyr::mutate(location=as.character(location),
+                horizon=as.character(horizon))
+
+# get less columns
+scale_dis_l <- scale_ov_dis2 %>% 
+  dplyr::select(-c("forecast_date","approx_cd"))
+# add truth death
+truth_death_hr <- truth_death  %>%
+  dplyr::mutate(scaled_cd=value) %>%
+  dplyr::select(location,target_end_date,scaled_cd)
+truth_death_hr$horizon <- "truth"
+truth_death_hr <- truth_death_hr[,c(3,1,4,2)]
+scale_ov2 <- rbind(scale_dis_l,truth_death_hr) %>%
+  dplyr::filter(location %in% c("US",locs_short[c(1,4,8,12)]),
+                !horizon %in% c(2,3),
+                target_end_date %in% dates_kept) %>%
+  dplyr::mutate(type=ifelse(horizon=="truth",horizon,
+                            ifelse(horizon==1,"1-wk ahead","4-wk ahead")
+                            )
+                ) 
+scale_ov2_p <- scale_ov_dis2 %>%
+  # dplyr::mutate(cut=ifelse(horizon==1,250,500)) %>%
+  dplyr::filter(horizon!="truth",
+                location %in% c("US",locs_short[c(1,4,8,12)]),
+                !horizon %in% c(2,3),
+                target_end_date %in% dates_kept
+                ) 
+# %>%
+#   dplyr::select(-"cut")
+```
+
+
+- We see increasing scaled dissimilarity among forecasts made for target end dates during the wave. There seems to be some relationship between 1-wk absolute changes and scaled CD among 1-wk ahead forecasts, and the same can be said about 4-wk change and 4-wk ahead forecasts. 
+- This could be useful when we are a few weeks away from the beginning of a wave because we can anticipate a change in trends of incident deaths from the dissimilarity among 1-4 wk ahead forecasts.
+- Should we calculate some correlation between two time series here? 
+
+```{r cat2,fig.align='center',out.width='100%',out.height='80%'}
+#truth panel
+t_box <- scale_ov2 %>%
+  dplyr::filter(horizon=="truth") %>%
+  dplyr::mutate(`incident death`=ifelse(location=="US",scaled_cd/10,scaled_cd)) %>%
+  dplyr::group_by(location) %>%
+  dplyr::arrange(location,target_end_date) %>%
+  dplyr::mutate(growth_1=abs(`incident death`-lag(`incident death`))/lag(`incident death`),
+                growth_4=abs(`incident death`-lag(`incident death`,4))/lag(`incident death`,4)) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(-"scaled_cd") %>%
+  pivot_longer(!c("location","horizon","target_end_date","type"),names_to="type_v",values_to="value") %>%
+  drop_na() 
+median_p <-  scale_ov2_p %>% 
+  dplyr::select(-"approx_cd") %>%
+  dplyr::group_by(location,target_end_date,horizon) %>%
+  dplyr::mutate(med_scale=median(scaled_cd)) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(-"scaled_cd") %>%
+  pivot_longer(!c("location","horizon","target_end_date","forecast_date"),names_to="type_v",values_to="value") %>%
+  distinct()
+
+g_box <- ggplot()+
+  geom_line(data=t_box,aes(x=target_end_date,y=value),show.legend=FALSE)+
+  geom_line(data=median_p,aes(x=forecast_date,y=value,color=horizon))+
+  facet_grid(type_v~location,scales="free_y")+
+  ylab("")+
+  xlab("")+
+  scale_x_date(date_breaks="2 months",date_labels="%b-%y")+
+  scale_color_brewer(palette = "Dark2") +
+  theme_bw()+
+  theme(axis.text.x=element_text(size=rel(0.5),angle = -40,hjust = -0.1),
+        axis.text.y=element_text(size=rel(0.5)),
+  #      aspect.ratio = 1.2,
+        strip.text.x = element_text(margin = margin(0.1,0,0.1,0, "cm")),
+        panel.spacing.x = unit(0.1, "lines"),
+        legend.position = "bottom"
+        )
+#growth panel
+# g_box <-scale_ov2 %>%
+#   dplyr::filter(horizon=="truth") %>%
+#   dplyr::group_by(location) %>%
+#   dplyr::mutate(growth=abs(scaled_cd-lag(scaled_cd))/lag(scaled_cd)) %>%
+#   dplyr::ungroup() %>%
+#   ggplot()+
+#   geom_line(aes(x=target_end_date,y=growth))+
+#   facet_wrap(~location,scales="free_y",nrow = 1)+
+#   ylab("% Change")+
+#   xlab("")+
+#   scale_x_date(date_breaks="2 months",date_labels="%b-%y")+
+#   theme_bw()+
+#   theme(axis.text.x=element_text(size=rel(0.5),angle = -40,hjust = -0.1),
+#         axis.text.y=element_text(size=rel(0.5)),
+#         legend.position = "bottom",
+#   #      aspect.ratio = 1.2,
+#         strip.text.x = element_text(margin = margin(0.1,0,0.1,0, "cm")),
+#         panel.spacing.x = unit(0.1, "lines")
+#         )
+# g_box
+# plot raw medians
+# median_p <-  scale_ov2_p %>% 
+#   dplyr::group_by(location,target_end_date,horizon) %>%
+#   dplyr::mutate(med_scale=median(scaled_cd)) %>%
+#   dplyr::ungroup() %>%
+#   ggplot()+
+#   geom_line(aes(x=target_end_date,y=med_scale,color=type),show.legend = FALSE)+
+#   facet_wrap(~location,nrow=1)+
+#   ylab("Median scaled \napprox. CD")+
+#   xlab("")+
+#   scale_x_date(date_breaks="2 months",date_labels="%b-%y")+
+#   theme_bw()+
+#   theme(axis.text.x=element_text(size=rel(0.5),angle = -40,hjust = -0.1),
+#         axis.title.x = element_text(size=rel(0.8)),
+#         axis.title.y = element_text(size=rel(0.8)),
+#         axis.text.y=element_text(size=rel(0.5)),
+#         legend.position = "bottom",
+# #        aspect.ratio = 1,
+#         strip.background = element_blank(),
+#         strip.text.x = element_blank(),
+#         plot.margin = unit(c(-0.5,0,-0.5,0), "cm")
+#         )
+#median_p 
+# change to box plot
+cd_box <-  scale_ov2_p %>%
+  dplyr::filter(target_end_date %in% sort(unique(scale_ov2_p$target_end_date[c(TRUE,FALSE)]))) %>%
+  ggplot()+
+  geom_boxplot(aes(y=target_end_date,x=log(approx_cd),color=horizon,group=as.factor(target_end_date)),
+               outlier.size=0.1,show.legend = FALSE,
+               lwd=rel(0.4))+
+  facet_grid(horizon~location,scales="free")+
+  xlab("Log-transformed approx. CD")+
+  ylab("Target end date")+
+  scale_y_date(date_breaks="2 months",date_labels="%b-%y")+
+  scale_color_brewer(palette = "Dark2") +
+#  scale_x_continuous(limits = quantile(scale_ov2_p$scaled_cd, c(0.05, 0.95)))+
+  coord_flip() +
+  theme_bw()+
+  theme(axis.text.x=element_text(size=rel(0.5),angle = -40,hjust = -0.1),
+        axis.title.x = element_text(size=rel(0.8)),
+        axis.title.y = element_text(size=rel(0.8)),
+        axis.text.y=element_text(size=rel(0.5)),
+        legend.position = "bottom",
+        legend.margin=margin(0,0,0,0)
+   #     aspect.ratio = 1,
+        # strip.background = element_blank(),
+        # strip.text.x = element_blank()
+        )
+cd_box1 <-  scale_ov2_p %>%
+  dplyr::filter(target_end_date %in% sort(unique(scale_ov2_p$target_end_date[c(TRUE,FALSE)]))) %>%
+  ggplot()+
+  geom_boxplot(aes(y=target_end_date,x=approx_cd,color=horizon,group=as.factor(target_end_date)),
+               outlier.size=0.1,show.legend = FALSE,
+               lwd=rel(0.4))+
+  facet_grid(horizon~location,scales="free")+
+  xlab("Approx. CD")+
+  ylab("Target end date")+
+  scale_y_date(date_breaks="2 months",date_labels="%b-%y")+
+  scale_color_brewer(palette = "Dark2") +
+#  scale_x_continuous(limits = quantile(scale_ov2_p$scaled_cd, c(0.05, 0.95)))+
+  coord_flip() +
+  theme_bw()+
+  theme(axis.text.x=element_text(size=rel(0.5),angle = -40,hjust = -0.1),
+        axis.title.x = element_text(size=rel(0.8)),
+        axis.title.y = element_text(size=rel(0.8)),
+        axis.text.y=element_text(size=rel(0.5)),
+        legend.position = "bottom",
+   #     aspect.ratio = 1,
+        # strip.background = element_blank(),
+        # strip.text.x = element_blank()
+        )
+#grid.arrange(g_box,cd_box,nrow=2)
+g_box
+cd_box
+cd_box1
+```             
+
+- This plot compares the raw CD and the transformed scaled CD to give us more information how the CDs change post transformation. Raw CDs roughly follow the observed incident deaths due to scale.
+
+## Scatterplots of median scaled CDs vs absolute change 
+
+I excluded a couple of outliers (median scaled cd >>> 45).
+
+```{r cat3,fig.align='center',out.width='100%',out.height='80%'}
+#truth panel
+t_box_1 <- t_box %>%
+  dplyr::mutate(horizon=as.character(ifelse(type_v=="growth_1",1,4))) %>%
+  dplyr::filter(type_v %in% c("growth_1","growth_4")) %>%
+  dplyr::left_join(median_p,by=c("location","horizon","target_end_date")) 
+t_box_1 %>%
+  ggplot()+
+  geom_point(aes(x=value.y,y=value.x))+
+  facet_grid(horizon~location,scales="free")+
+  ylab("Absolute change")+
+  xlab("Median scaled CDs")+
+  ggtitle("With outliers")+
+  theme_bw() 
+
+t_box_1 %>%
+  dplyr::filter(value.y<45) %>%
+  ggplot()+
+  geom_point(aes(x=value.y,y=value.x))+
+  facet_grid(horizon~location,scales="free")+
+  ylab("Absolute change")+
+  xlab("Median scaled CDs")+
+  ggtitle("No outlier (median >45 excluded)")+
+  theme_bw()
+```   
+
+# Similarity by type
+
+The models are selected based on their submission on the date designated as the moment of change dates and the number of submissions overall during 2021. We have 6 stats/ML models and 7 mechanistic models. Model included in the analysis are:
+
+```{r,cache=TRUE}
+#medata
+s_list <- c("CEID-Walk","CMU-TimeSeries","COVIDhub-baseline","GT-DeepCOVID","JHU_CSSE-DECOM",
+            "Microsoft-DeepSTIA","MIT_CritData-GBCF","MIT_ISOLAT-Mixtures","MUNI-ARIMA",
+            "RobertWalraven-ESG","UCSB-ACTS","UMich-RidgeTfReg","GT-DeepCOVID","IHME-CurveFit",
+            "DDS-NBDS","UT-Mobility","USC-SI_kJalpha")
+meta <- metadat %>%
+  dplyr::mutate(type=ifelse(model_abbr %in% s_list,"non_SIR","SIR"),
+                model_abbr=str_replace(model_abbr,"\\-",".")) 
+# pw
+pairwise_hm <- dist_test_dates %>%
+  dplyr::mutate(forecast_date = (as.Date(target_end_date)+2)-(7*horizon)) %>%
+  dplyr::group_by(location,forecast_date) %>%
+  #dplyr::filter(approx_cd<=quantile(approx_cd,0.975)) %>% 
+  dplyr::mutate(scd0=(approx_cd-min(approx_cd))/(max(approx_cd)-min(approx_cd)),
+                approx_cd01=ifelse(is.na(scd0),0,scd0)) %>%
+  dplyr::ungroup()  %>%
+  dplyr::group_by(horizon,location,model_1,model_2) %>%
+  dplyr::mutate(approx_cd1=median(approx_cd01)) %>%
+  dplyr::ungroup()  %>%
+  dplyr::select(horizon,location,approx_cd1,model_1,model_2) %>%
+  distinct()
+pairwise_hm2 <- dist_test %>%
+  dplyr::filter(model_1!="PSI.DRAFT",model_2!="PSI.DRAFT",
+                horizon %in% c(1,4)
+#                model_1!="Karlen.pypm",model_2!="Karlen.pypm",
+                # model_1!="USC.SI_kJalpha",model_2!="USC.SI_kJalpha"
+) %>%
+  dplyr::mutate(forecast_date = (as.Date(target_end_date)+2)-(7*horizon),
+                approx_cd1=approx_cd
+                ) %>%
+  dplyr::select(horizon,location,approx_cd1,model_1,model_2)
+meta1 <- meta %>%
+  dplyr::filter(
+    # !model_abbr %in% c("USC-SI_kJalpha")
+    )
+meta_p %>%
+  dplyr::mutate(type=ifelse(type=="SIR","mechanistic","data_adaptive/ML")) %>%
+  print(.)
+```
+
+<!-- ```{r heat,fig.align='center',out.width='95%',out.height='90%'} -->
+<!-- distance_heatmap(pairwise_hm,"Scaled Approx. CD of Inc Death Forecasts by Horizon-Location - Overall",meta1,locs_short) -->
+<!-- ``` -->
+## Moment of change before the summer/fall 2021 wave of incident deaths
+
+Below are the plots of incident deaths in 14 locations that experienced a noticeable summer wave in 2021 (they are selected based on objective criteria). The shaded portions show the target end dates (we only test the first and the last dates of the portion) selected for testing.
+
+```{r truth_line,fig.align='center',out.height='80%'}
+# have to fix before printing
+for(i in locs_short){
+  assign(paste0(i,"_dates"),
+         as.Date(unique(c(death_dat_test$forecast_date[death_dat_test$location==i]))+7)-2)
+}
+
+# plot
+truth_death %>%
+  dplyr::filter(target_end_date > "2021-03-31" &target_end_date < "2021-11-30") %>%
+  dplyr::filter(location %in% locs_short) %>%
+  dplyr::mutate(target_end_date=as.Date(target_end_date),
+                phase_date1 = ifelse(location=="54",
+                                     `54_dates`,
+                                     ifelse(location=="12",
+                                            `12_dates`,
+                                            ifelse(location=="13",
+                                                   `13_dates`,
+                                                   ifelse(location=="16",
+                                                          `16_dates`,
+                                                          ifelse(location=="48",
+                                                          `48_dates`,
+                                                          ifelse(location=="05",
+                                                          `05_dates`,
+                                                          ifelse(location=="22",
+                                                          `22_dates`,
+                                                          ifelse(location=="28",
+                                                          `28_dates`,
+                                                          ifelse(location=="39",
+                                                          `39_dates`,
+                                                          ifelse(location=="41",
+                                                          `41_dates`,
+                                                          ifelse(location=="45",
+                                                          `45_dates`,
+                                                          ifelse(location=="48",
+                                                          `48_dates`,
+                                                          ifelse(location=="53",
+                                                          `53_dates`,
+                                                          `37_dates`))))))
+                                                          )
+                                                          )
+                                                          )
+                                                          )
+                                                   )
+                                            )
+                                     )
+                ) %>%
+  dplyr::mutate(value = ifelse(value<0,0,value),
+                phase_date1=as.Date(phase_date1, origin="1970-01-01")) %>%
+  ggplot() +
+  geom_line(aes(x=as.Date(target_end_date),y=value))+
+  geom_rect(aes(xmin=phase_date1,xmax=phase_date1+28, ymin=0,ymax=Inf),fill="lightblue",alpha=0.05)+
+ # geom_vline(aes(xintercept=phase_date1),color="blue") +
+ # geom_vline(aes(xintercept=phase_date1+28),color="blue") +
+  facet_wrap(~location,scales = "free",nrow=4)+
+  theme_bw()
+```
+
+```{r}
+test_norep_phase <- dist_test_norepeat %>%
+  dplyr::mutate(forecast_date=(target_end_date-(7*horizon))+2) 
+# %>%
+#   dplyr::mutate(phase=ifelse(forecast_date>"2021-03-30", "pre_peak", "post_peak"))
+# # define interesting periods
+# type for deaths - 16 models with 7 being stats
+mods <- colnames(death_dat_test_dates)[-c(1:7)]
+s_list <- str_replace(s_list,"\\-",".")
+e_list <- mods[!mods %in% s_list]
+# plot models forecast on these dates by location
+phased <- type_dis_phase(test_norep_phase,s_list,e_list)  %>%
+  dplyr::filter(horizon %in% c(1,4))
+```
+
+```{r,include=FALSE}
+d1 <- distance_heatmap(pairwise_hm2,"",meta1,locs_short[1:7],FALSE)
+d2 <- distance_heatmap(pairwise_hm2,"",meta1,locs_short[8:14],FALSE)
+```
+
+```{r heat2,fig.align='center',out.width='95%',out.height='90%'}
+grid.arrange(d1,d2,ncol=2,
+             top="Approx. CD of Inc Death Forecasts by Horizon-Location - Summer/Fall 2021 Wave")
+```
+
+- The plots are by model acronyms. Blue are stats/ML and Orange are mechanistic models. Karlen-pypm seems to be dissimilar from other models for all 14 locations.
+- Looking at this by quadrants, there seems to be more dissimilarity among mechanistic models than among stats/ML models. There are some dissimilarity between groups, but not as strong as the first relationship.
+
+## Boxplots of log-transformed approx. CDs by categories 
+
+```{r box,fig.align='center',out.width='95%',out.height='90%'}
+# plot models forecast on these dates by location (dist from baseline)
+box_type_phase(phased,locs_short,"Within and between group difference at prior to the fall wave (single forecast date)")
+```
+
+```{r box_within,fig.align='center',out.width='95%',out.height='90%'}
+# plot models forecast on these dates by location (dist from baseline)
+box_type_phase(phased,locs_short,"Within group differences between two types",within=TRUE)
+```
+
+- Plotted on a log scale since these are right-skewed. 
+- Despite variations, the median of distances between different groups and the median of distances within group are not that different across all locations at the beginning of a wave. This agrees with the heatmap.
+- We see more distinct differences between distances among stats/ML models anddistances among mechanistic models. Mechanistic models are dissimilar among one another at the beginning of a wave.
+
+<!-- ## EDA on dissimilarity across multiple dates (test dates) -->
+
+<!-- ```{r truth_line,fig.align='center',out.width='60%',out.height='50%'} -->
+<!-- ``` -->
+
+<!-- ### boxplots and proportions -->
+
+<!-- ```{r truth_line,fig.align='center',out.width='60%',out.height='50%'} -->
+<!-- ``` -->
+<!-- ### Decomposition between groups -->
+
+## Permutation test
+
+To check if the dissimilarity between groups is significant prior to observing a wave, we did a permutation test. The hypotheses are
+
+- $\text{H}_0:$ Prior to an increase in deaths, forecasts from different model types are as similar as forecasts from same model types.
+- $\text{H}_A:$ Prior to an increase in deaths, forecasts from different model types are more dissimilar compared to forecasts from the same model types.
+
+This simple two-way design permute forecasts within each location and keep the permutation order constant across location. This will keep the location-specific variability constant across all permutations. The test statistic is 
+
+$$
+\text{T}_{\text{cd}}=\frac{\text{median(between-group approx. CD)}}{\text{median(within-group approx. CD)}}.
+$$
+
+The ratio of medians can alleviate an issue of outliers in the distances that would effect the mean. We have 4 sets off hypotheses for each horizon. All possible number of permutations for each test is $14!/(6!7!)$. For now I shuffle 3000 times.
+
+```{r,cache=TRUE}
+# read permutation test statistics
+pt_h1 <- read.csv("./data/analysis_data/perm_test_stats_h1.csv")
+pt_h4 <- read.csv("./data/analysis_data/perm_test_stats_h4.csv")
+# test_dat0 <- death_dat_test_long %>%
+#   dplyr::select(c("model","location","horizon","quantile","value")) %>%
+#   dplyr::mutate(model=str_replace(model,"\\-",".")) %>%
+#   dplyr::left_join(meta_p, by=c("model"="model_abbr")) %>%
+#   dplyr::mutate(group_vec=type) %>% 
+#   dplyr::select(-"type")
+# calculate observed test stats
+obs_t <- dist_test_norepeat %>%
+  dplyr::left_join(meta_p, by=c("model_1"="model_abbr")) %>%
+  dplyr::left_join(meta_p, by=c("model_2"="model_abbr")) %>%
+  dplyr::mutate(type=ifelse(type.x==type.y,"within","between")) %>%
+  dplyr::group_by(horizon,type) %>%
+  dplyr::transmute(horizon=horizon,
+                type=type,
+                med_stats=median(approx_cd)) %>%
+  dplyr::ungroup() %>%
+  dplyr::distinct() %>%
+  dplyr::group_by(horizon) %>%
+  dplyr::transmute(horizon=horizon,
+                   med_ratio=med_stats[type=="between"]/med_stats[type=="within"]) %>%
+  dplyr::ungroup() %>%
+  dplyr::distinct()
+# calculate perm t
+B <- 3000
+# loc_ord <- test_dat0$location
+#rm(test_dat0)
+perm_t1 <- perm_t4 <- matrix(NA,nrow=B,ncol=1)
+for (i in 1:B){
+  # change to median radio?
+  perm_t1[i] <- median(pt_h1[,i][pt_h1$X3001=="between"])/median(pt_h1[,i][pt_h1$X3001=="within"])
+  perm_t4[i] <- median(pt_h4[,i][pt_h4$X3001=="between"])/median(pt_h4[,i][pt_h4$X3001=="within"])
+}
+# calculate p
+p1<- sum(perm_t1 > obs_t$med_ratio[obs_t$horizon==1])/B
+# p2<- sum(perm_t2 > obs_t$med_ratio[obs_t$horizon==2])/B
+# p3<- sum(perm_t3 > obs_t$med_ratio[obs_t$horizon==3])/B
+p4<- sum(perm_t4 > obs_t$med_ratio[obs_t$horizon==4])/B
+
+print(paste0("P-values: ",p1,",",
+             # p2,",",p3,",",
+             p4))
+```
+
+```{r perm,fig.align='center',out.width='75%',out.height='60%'}
+# plot
+test_stats <- data.frame(rbind(
+  cbind(perm_t1,horizon=1),
+  # cbind(perm_t2,horizon=2),
+  # cbind(perm_t3,horizon=3),
+  cbind(perm_t4,horizon=4)
+  )) 
+names(test_stats) <- c("value","horizon")
+test_stats <- test_stats %>%
+  dplyr::left_join(obs_t,by=c("horizon"))
+
+ggplot(test_stats) +
+  geom_histogram(aes(x=value),fill="lightblue",color="black") +
+  geom_vline(aes(xintercept = med_ratio),color="red")+
+  facet_wrap(~horizon)+
+  theme_bw()
+
+```
+
+- None of the p-values are significant. We probably don't have to adjust for correlated tests given that we didn't do a lot of tests for it to be concerning and the results won't change. We fail to reject $H_0$ that prior to an increase in deaths in the summer/fall of 2021, forecasts from different model types are as similar as forecasts from same model types
+- I think we have enough power given the total possible number of permutations are not that small, but we will need simulation if this testing framework make sense.
+- It's possible that ML models' forecasts are similar things at the beginning of the wave, and mechanistic models are all over the place. We can test the hypothesis that (median) dissimilarity among stats/ML models is lower compared to (median) dissimilarity among mechanistic models right before we see the wave.
+
+# Median dissimilarity vs ensemble WIS 
+
+The scaled approx. CDs here are the same as the ones in the earlier section.
+
+```{r, cache=TRUE}
+scores <- read.csv("./data/score_df.csv") %>%
+  dplyr::filter(model=="COVIDhub-4_week_ensemble",
+                score_name=="wis") %>%
+  dplyr::mutate(location = ifelse(location>=10,as.character(location),paste0("0",as.character(location))),
+                target_end_date=as.Date(target_end_date))
+comb_table <- dist_gen_norepeat %>%
+  dplyr::group_by(location,horizon,target_end_date) %>%
+  dplyr::mutate(med_dis=median(approx_cd)) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(location,horizon,target_end_date,med_dis) %>%
+  distinct() %>%
+  dplyr::left_join(scores,by=c("location","horizon","target_end_date"))
+
+scores_s <- read.csv("./data/score_df.csv") %>%
+  dplyr::mutate(location = ifelse(location>=10,as.character(location),paste0("0",as.character(location))),
+                target_end_date=as.Date(target_end_date),
+                horizon=as.character(horizon)) %>%
+  dplyr::filter(score_name=="wis") %>%
+  dplyr::group_by(location,horizon,target_end_date) %>%
+  dplyr::mutate(base=score_value[model=="COVIDhub-baseline"]) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(model=="COVIDhub-4_week_ensemble") %>%
+  dplyr::mutate(scaled_score=score_value/base) 
+median_t <- median_p %>%
+  dplyr::left_join(scores_s,by=c("location","horizon","target_end_date"))
+```
+
+```{r dis_ens,fig.align='center',out.width='90%',out.height='60%'}
+comb_table %>%
+  dplyr::filter(location %in% c("01","13","37","48"),
+                horizon %in% c(1,4)) %>%
+  ggplot() +
+  geom_point(aes(x=med_dis,y=score_value),size=0.5)+
+  xlab("Median of approx. cds of all forecast pairs submitted on each date")+
+  ylab("Ensemble wis")+
+  facet_grid(location~horizon,scales = "free")
+```
+
+```{r dis_ens1,fig.align='center',out.width='90%',out.height='60%'}
+median_t %>%
+  dplyr::filter(location %in% c("01","13","37","48")) %>%
+  ggplot() +
+  xlab("Median of scaled approx. cd of all forecast pairs submitted on each date")+
+  ylab("Ensemble wis relative to baseline")+
+  geom_point(aes(x=value,y=scaled_score),size=0.5)+
+  facet_grid(location~horizon,scales = "free")
+```
+- Maybe a bit of a positive correlation here? 
+
+# Decomposition: UMass-MechBayes vs COVIDhub-4_week_ensemble
+
+```{r}
+# decomposition
+# add another model do for two location
+decom_models <- c("UMass.MechBayes","COVIDhub.4_week_ensemble")
+decom_list <- read.csv("./data/analysis_data/decomp_data_left.csv") %>%
+  dplyr::filter(model_1 %in% decom_models & model_2 %in% decom_models,
+                horizon %in% c(1,4)) %>%
+  dplyr::mutate(location = ifelse(nchar(location)==3,substr(location,2,3),location)) %>%
+  dplyr::filter(model_1 != model_2) %>%
+  rowwise() %>%
+  mutate(key = paste(sort(c(model_1, model_2)), collapse="")) %>%
+  distinct(key, approx_cd, horizon, location, target_end_date, .keep_all=T) %>%
+  dplyr::select(-key)
+```
+
+
+```{r decomp,fig.align='center',out.width='90%',out.height='60%'}
+# location 2
+# check best performing model vs ensemble
+decom_list %>%
+  dplyr::filter(location %in% locs_short[12:13]) %>%
+  stack_plot(., "COVIDhub.4_week_ensemble", "UMass.MechBayes", by_date=TRUE)
+truth_death %>%
+  dplyr::filter(location %in% locs_short[12:13]) %>%
+  ggplot() +
+  geom_line(aes(x=as.Date(target_end_date),y=value))+
+  scale_x_date(date_breaks = "2 months")+
+  facet_wrap(~location,scales = "free",nrow=1)+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle=-45,hjust=-0.1))
+# decom_list %>%
+#   dplyr::filter(location %in% locs_short[12:13]) %>%
+#   stack_plot(., "COVIDhub.4_week_ensemble", "GT.DeepCOVID", by_date=TRUE)
+# decom_list %>%
+#   dplyr::filter(location %in% locs_short[12:13]) %>%
+#   stack_plot(., "GT.DeepCOVID", "UMass.MechBayes", by_date=TRUE)
+```
+
+```{r concept2,fig.align='center',out.width='100%',out.height='100%',cache=TRUE}
+concept_plot2("48", c("2021-02-01","2021-10-25"),c("COVIDhub-4_week_ensemble", "UMass-MechBayes"),death_dat_gen)
+concept_plot2("53", c("2021-02-01","2021-10-25"),c("COVIDhub-4_week_ensemble", "UMass-MechBayes"),death_dat_gen)
+# concept_plot("13", c("2021-04-05","2021-08-02"),c("GT-DeepCOVID", "UMass-MechBayes"),death_dat_gen)
+```
+
+- MechBayes often having larger right shift in distribution compared to the ensemble in TX but vice versa is true in WA.

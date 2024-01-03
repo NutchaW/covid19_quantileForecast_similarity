@@ -1,0 +1,2227 @@
+---
+title: "Forecast Similarity Using Cramer Distance Approximation"
+author: "Johannes Bracher, Evan Ray, Nick Reich, Nutcha Wattanachit"
+date: "03/02/2021"
+header-includes:
+   - \usepackage{amsmath}
+   - \usepackage{tabularx}
+   - \usepackage{hyperref}
+   - \usepackage{multicol}
+   - \usepackage{longtable}
+   - \usepackage{array}
+   - \usepackage{multirow}
+   - \usepackage{wrapfig}
+   - \usepackage{float}
+   - \usepackage{colortbl}
+   - \usepackage{pdflscape}
+   - \usepackage{tabu}
+   - \usepackage{threeparttable}
+   - \usepackage{threeparttablex}
+   - \usepackage{makecell}
+   - \usepackage{xcolor}
+   - \usepackage{tikz}
+   - \usepackage{pgfplots}
+output:
+  pdf_document:
+        keep_tex: true
+        latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(energy)
+library(knitr)
+library(data.table)
+library(covidHubUtils)
+library(RColorBrewer)
+#devtools::install_github("reichlab/covidHubUtils",force=TRUE)
+library(lubridate)
+library(zoltr)
+library(igraph)
+library(gtools)
+library(gtable)
+library(gridExtra)
+library(grid)
+library(ggdendro)
+library(gridGraphics)
+library(ExtDist)
+knitr::opts_chunk$set(echo=FALSE,
+                       comment = FALSE, message=FALSE, fig.show= 'hold',fig.pos="H",table.placement="H",
+                       fig.align = 'center',warning =FALSE)
+```
+
+# Cramer Distance
+
+Consider two predictive distributions $F$ and $G$. Their *Cramer distance* or *integrated quadratic distance*  is defined as
+
+$$
+\text{CD}(F, G) = \int_{-\infty}^\infty(F(x) - G(x))^2 dx
+$$
+where $F(x)$ and $G(x)$ denote the cumulative distribution functions. It can also be written as
+\begin{equation}
+\text{CD}(F, G) = \mathbb{E}_{F, G}|x - y| - 0.5 \left[\mathbb{E}_F|x - x'| + \mathbb{E}_G|y - y'| \right], \label{eq:formulation_expectations}
+\end{equation}
+where $x, x'$ are independent random variables following $F$ and $y, y'$ are independent random variables following $G$. This formulation illustrates that the Cramer distance depends on the shift between $F$ and $G$ (first term) and the variability of both $F$ and $G$ (of which the two last expectations in above equation are a measure).
+
+The Cramer distance is the divergence associated with the continuous ranked probability score (Thorarinsdottir 2013, Gneiting and Raftery 2007), which is defined by
+
+\begin{align}
+\text{CRPS}(F, y) &= \int_{-\infty}^\infty(F(x) - \mathbf{1}(x \geq y))^2 dx = ) \\
+&= 2\int_0^1((\mathbf{1}(y \leq q^F_k)-\tau_k)(q^F_k-y) d\tau_k \label{eq:crps}
+\end{align}
+
+where y denotes the observed value. Indeed, it is a generalization of the CRPS as it simplifies to the CRPS
+if one out of F and G is a one-point distribution. Indeed, it is a generalization of the CRPS as it simplifies to the CRPS if one out of $F$ and $G$ is a one-point distribution. The Cramer distance is commonly used to measure the similarity of forecast distributions (see Richardson et al 2020 for a recent application).
+
+## Cramer Distance Approximation for Equally-Spaced Intervals
+
+Now assume that for each of the distributions $F$ and $G$ we only know $K$ quantiles at equally spaced levels $\tau_1 = 1/(K + 1), \tau_2 = 2/(K + 1), \dots, \tau_K = K/(K + 1)$. Denote these quantiles by $q^F_1 \leq q^F_1 \leq \dots \leq q^F_K$ and $q^G_1 \leq q^G_2 \leq \dots \leq q^G_K$, respectively. It is well known that the CRPS can be approximated by an average of linear quantile scores (Laio and Tamea 2007, Gneiting and Raftery 2007):
+\begin{equation}
+\text{CRPS}(F, y) \approx \frac{1}{K} \times \sum_{k = 1}^K 2\{\mathbf{1}(y \leq q^F_k) - k/(K + 1)\} \times (q^F_k - y).\label{eq:linear_quantile_scores}
+\end{equation}
+This approximation is equivalent to the weighted interval score (WIS) which is in use for evaluation of quantile forecasts at the Forecast Hub, see Section 2.2 of Bracher et al (2021). This approximation can be generalized to the Cramer distance as
+\begin{equation}
+\text{CD}(F, G) \approx \frac{1}{K(K + 1)}\sum_{i = 1}^K\sum_{j = 1}^K 2 \times \mathbf{1}\{(i \leq j \land q^F_i > q^G_j) \lor (i \geq j \land q^F_i < q^G_j)\} \times \left| q^F_i - q^G_j\right|. \label{eq:approx_cd}
+\end{equation}
+This can be seen as a sum of penalties for \textit{incompatibility} of predictive quantiles. Whenever the predictive quantiles $q_i^F$ and $q_j^G$ are incompatible in the sense that they imply $F$ and $G$ are different distributions (because $q_F^i > q_G^j$ despite $i \leq j$ or vice versa), a penalty $\left| q^F_i - q^G_j\right|$ is added.
+
+## Cramer Distance Approximation for Unequally-Spaced Intervals 
+
+Suppose we have quantiles $q_{1}^F,...,q_{K}^F$ and $q_{1}^G,...,q_{K}^G$ at $K$ probability levels $\tau_1,...,\tau_K$ (with $\tau_1=0$) from two distributions $F$ and $G$. Define the combined vector of quantiles $q_1, . . . , q_{2K}$ by combining the vectors $q_{1}^F,...,q_{K}^F$ and $q_{1}^G,...,q_{K}^G$ and sorting them in an ascending order. The CRPS can be approximated as follows
+\begin{equation}
+\text{CRPS}(F, y) \approx \frac{1}{K}\sum_{k = 1}^K 2\{\mathbf{1}(y \leq q^F_k)-\tau_k\} \times (q^F_k - y) .\label{eq:ls_unqe}
+\end{equation}
+
+This approximation can be generalized to the Cramer distance as
+\begin{equation}
+\text{CD}(F, G) \approx \frac{1}{K}\sum_{i = 1}^K\sum_{j = 1}^K 2 \times w_{ij} \times \mathbf{1}\{(i \leq j \land q^F_i > q^G_j) \lor (i \geq j \land q^F_i < q^G_j)\} \times \left| q^F_i - q^G_j\right|, \label{eq:approx_cd_uneq}
+\end{equation}
+
+where $w_{ij}=|\tau_i-\tau_j|$ (the difference of the probability levels).  The details on how to go from \eqref{eq:approx_cd_uneq} to the Riemann sums are still being worked out. Essentially, we can approximate the Cramer distance by eliminating the tails of the integral to the left of $q_1$ and the right of $q_{2K}$, and approximating the center via a Riemann sum:
+
+\begin{align}
+\text{CD}(F,G) &=\int^\infty_{-\infty}{F(x)−G(x)}^2dx\\
+&\approx \int^{q_{2K}}_{q_1}{F(x)−G(x)}^2dx\\
+&=\sum^{2K-1}_{j=1}\int^{q_{j+1}}_{q_j}{F(x)−G(x)}^2dx
+\end{align}
+
+There are a variety of options that can be used for each term in this sum, for instance:
+
+### Left-sided Riemann sum approximation
+
+\begin{align}
+\text{CD}(F,G) &\approx\sum^{2K-1}_{j=1}\int^{q_{j+1}}_{q_j}{F(x)−G(x)}^2\\
+&\approx\sum^{2K-1}_{j=1}\{\hat{F}(q_j)-\hat{G}(q_j)\}^2(q_{j+1}-q_{j})\\
+\end{align}
+
+
+Since $q_j\in \{q_1, ..., q_{2K}\}$ belongs to either $q_{1}^F,...,q_{K}^F$ or $q_{1}^G,...,q_{K}^G$, we can rewrite the above approximation using $\tau_1,...,\tau_K$ as follows
+
+
+\begin{align}
+\text{CD}(F,G) 
+&\approx\sum^{2K-1}_{j=1}\{\hat{F}(q_j)-\hat{G}(q_j)\}^2(q_{j+1}-q_{j})\\
+&=\sum^{2K-1}_{j=1}\{\tau^F_j-\tau^G_j\}^2(q_{j+1}-q_{j})
+\end{align}
+
+
+where $\tau^F_j \in \boldsymbol{\tau_F}$ and $\tau^G_j \in \boldsymbol{\tau_G}$. $\boldsymbol{\tau_F}$ and $\boldsymbol{\tau_G}$ are vectors of length $2K-1$ with elements 
+
+$$
+\tau^F_j=
+\begin{cases}
+I(q_1=q_1^F)\times \tau_{q_1}^F\hspace{7cm}\text{for }j=1\\
+I(q_j\in \{q_1^F, ..., q_{K}^F\})\times \tau_{q_j}^F+I(q_j\in \{q_1^G, ..., q_{K}^G\})\times \tau_{j-1}^F\hspace{0.3cm}\text{for }j>1\\
+\end{cases}
+$$
+
+where $\tau_{q_j}^F$ is the probability level corresponding to $q_j$ given $q_j$ in the pooled quantiles comes from $F$, and $\tau_{j-1}^F$ is the $(j-1)^{th}$ probability level in $\boldsymbol{\tau_F}$.
+
+$$
+\tau^G_j=
+\begin{cases}
+I(q_1=q_1^G)\times \tau_{q_1}^G\hspace{7cm}\text{for }j=1\\
+I(q_j\in \{q_1^G, ..., q_{K}^G\})\times \tau_{q_j}^G+I(q_j\in \{q_1^F,...,q_{K}^F\})\times \tau_{j-1}^G\hspace{0.3cm}\text{for }j>1\\
+\end{cases}
+$$
+
+where $\tau_{q_j}^G$ is the probability level corresponding to $q_j$ given $q_j$ in the pooled quantiles comes from $G$, and $\tau_{j-1}^G$ is the $(j-1)^{th}$ probability level in $\boldsymbol{\tau_G}$.
+
+### Trapezoidal rule
+
+\begin{align}
+\text{CD}(F,G) &\approx\sum^{2K-1}_{j=1}\int^{q_{j+1}}_{q_j}{F(x)−G(x)}^2\\
+&\approx\sum^{2K-1}_{j=1}\frac{\{\hat{F}(q_j)-\hat{G}(q_j)\}^2+\{\hat{F}(q_{j+1})-\hat{G}(q_{j+1})\}^2}{2}(q_{j+1}-q_{j})\\
+\end{align}
+
+
+Similarly, we can rewrite the above approximation using $\tau_1,...,\tau_K$ as defined in the left-sided Riemann sum approximation as follows
+
+\begin{align}
+\text{CD}(F,G) 
+&\approx\sum^{2K-1}_{j=1}\frac{\{\hat{F}(q_j)-\hat{G}(q_j)\}^2+\{\hat{F}(q_{j+1})-\hat{G}(q_{j+1})\}^2}{2}(q_{j+1}-q_{j})\\
+&=
+\sum^{2K-1}_{j=1}\frac{\{\tau^F_j-\tau^G_j\}^2+\{\tau^F_{j+1}-\tau^G_{j+1}\}^2}{2}(q_{j+1}-q_{j}).
+\end{align}
+
+
+## Cramer Distance Approximation for Unequally-Spaced Intervals and Different Probability Levels
+
+We (probably) can further modify the formula of the Cramer distance approximation for unequally-spaced intervals to accommodate different probability levels from $F$ and $G$. Suppose we have quantiles $q_{1}^F,...,q_{N}^F$ at $K$ probability levels $\tau_1^F,...,\tau_N^F$ from the distribution $F$, and $q_{1}^G,...,q_{M}^G$ at $M$ probability levels $\tau_1^G,...,\tau_M^G$ from the distribution $G$. Define the combined vector of quantiles $q_1, . . . , q_{N+M}$ by combining the vectors $q_{1}^F,...,q_{N}^F$ and $q_{1}^G,...,q_{M}^G$ and again sorting them in an ascending order. Using the same definitions as previously defined, we can approximate the Cramer distance via a Riemann sum as follows:
+
+### Left-sided Riemann sum approximation
+
+\begin{align}
+\text{CD}(F,G) &\approx\sum^{N+M-1}_{j=1}\int^{q_{j+1}}_{q_j}{F(x)−G(x)}^2\\
+&\approx\sum^{N+M-1}_{j=1}\{\hat{F}(q_j)-\hat{G}(q_j)\}^2(q_{j+1}-q_{j}),\\
+\end{align}
+
+which we can rewrite using $\tau_1^F,...,\tau_N^F$ and $\tau_1^G,...,\tau_M^G$ as follows
+
+
+\begin{align}
+\text{CD}(F,G) 
+&\approx\sum^{N+M-1}_{j=1}\{\hat{F}(q_j)-\hat{G}(q_j)\}^2(q_{j+1}-q_{j})\\
+&=\sum^{N+M-1}_{j=1}\{\tau^F_j-\tau^G_j\}^2(q_{j+1}-q_{j})
+\end{align}
+
+
+where $\tau^F_j \in \boldsymbol{\tau_F}$ and $\tau^G_j \in \boldsymbol{\tau_G}$. $\boldsymbol{\tau_F}$ and $\boldsymbol{\tau_G}$ are vectors of length $N+M-1$ with elements 
+
+$$
+\tau^F_j=
+\begin{cases}
+\tau_{q_j}^F\hspace{2cm}\text{if }q_j\in \{q_1^F, ..., q_{N}^F\}\\
+\tau_{q_{j-1}}^F\hspace{1.8cm}\text{if }q_j\notin \{q_1^F, ..., q_{N}^F\}\\
+\end{cases}
+$$
+
+where $\tau_{q_j}^F$ is the probability level corresponding to $q_j$ given $q_j$ in the pooled quantiles comes from $F$.
+
+$$
+\tau^G_j=
+\begin{cases}
+\tau_{q_j}^G\hspace{2cm}\text{if }q_j\in \{q_1^G, ..., q_{M}^G\}\\
+\tau_{q_{j-1}}^G\hspace{1.8cm}\text{if }q_j\notin \{q_1^G, ..., q_{M}^G\}\\
+\end{cases}
+$$
+
+where $\tau_{q_j}^G$ is the probability level corresponding to $q_j$ given $q_j$ in the pooled quantiles comes from $G$.
+
+### Trapezoidal rule
+
+\begin{align}
+\text{CD}(F,G) &\approx\sum^{2K-1}_{j=1}\int^{q_{j+1}}_{q_j}{F(x)−G(x)}^2\\
+&\approx\sum^{N+M-1}_{j=1}\frac{\{\hat{F}(q_j)-\hat{G}(q_j)\}^2+\{\hat{F}(q_{j+1})-\hat{G}(q_{j+1})\}^2}{2}(q_{j+1}-q_{j}),\\
+\end{align}
+
+which we can rewrite as follows
+
+\begin{align}
+\text{CD}(F,G) 
+&\approx\sum^{N+M-1}_{j=1}\frac{\{\hat{F}(q_j)-\hat{G}(q_j)\}^2+\{\hat{F}(q_{j+1})-\hat{G}(q_{j+1})\}^2}{2}(q_{j+1}-q_{j})\\
+&=
+\sum^{N+M-1}_{j=1}\frac{\{\tau^F_j-\tau^G_j\}^2+\{\tau^F_{j+1}-\tau^G_{j+1}\}^2}{2}(q_{j+1}-q_{j}).
+\end{align}
+
+<!-- ## Divergence index for measuring consistency/stability of models and ensemble  -->
+
+<!-- The difference between two forecasts made on consecutive weeks and valid for the same time is -->
+
+<!-- $$ -->
+<!-- D_{enddate=t,h}=cd(F_{enddate=t,h+1},F_{enddate=t,h}), h=1,2,3 -->
+<!-- $$ -->
+
+<!-- Divergence index is -->
+
+<!-- $$ -->
+<!-- DI_{enddate=t}=\frac{1}{3}(\sum^{3}_{h=1} D_{enddate=t,h}-cd(F_{enddate=t,3},F_{enddate=t,1})) -->
+<!-- $$ -->
+
+<!-- # Forecast inclusion criteria -->
+
+<!-- The following criteria were applied to death and case forecasts separately.  -->
+
+<!-- * Targets: 1-4 wk ahead inc death and inc case -->
+<!-- * Forecast dates: Nov 2nd, 2020 - Jan 10th,2022 - we may relax this depending on the situation -->
+<!-- * Probability levels: All (maybe do at least half? - check in sim if they yield about the same results) -->
+<!-- * Locations: -->
+<!--    + 5 states with highest cumulative deaths by target end date Feb 5th, 2022 and US National -->
+<!--    + 5 states with highest cumulative cases by target end date Feb 5th, 2022 and US National -->
+
+```{r}
+# source function
+source("./functions/distance_func_script.R")
+source("./functions/decomposition.R")
+source("./functions/plot_func.R")
+# 
+# # get data
+# case_dat <- read.csv("./data/formatted_cf.csv")
+# death_dat <- read.csv("./data/formatted_df.csv")
+# truth_dat <- read.csv("./data/truth.csv") %>%
+#   dplyr::filter(geo_type=="state")
+# metadat <- read.csv("./data/metadata_filtered.csv")
+# # location
+# location_d <- unique(death_dat$location)
+# location_c <- unique(case_dat$location)
+```
+
+<!-- ```{r} -->
+<!-- # categorize data and model  -->
+<!-- # only categorize definite knowns for both, and put NA for others -->
+<!-- metadat_appended <- metadat[,1:12] %>% -->
+<!--   dplyr::mutate(model_type = , -->
+<!--                 data = ) -->
+<!-- ``` -->
+<!-- ## Examples of forecasts and Cramer distances -->
+
+<!-- ```{r,cache=TRUE} -->
+<!-- # set targets for analysis -->
+<!-- target_horizon <- 1:4 -->
+<!-- target_var <- c("inc death","inc case") -->
+<!-- # set quantiles -->
+<!-- q_set1 <- unique(death_dat$quantile)  -->
+<!-- q_set2 <- unique(case_dat$quantile)  -->
+
+<!-- #--------------- death forecasts calculation----------------------# -->
+<!-- # d_frame1 <- d_frame %>% -->
+<!-- #   dplyr::filter(location %in% c(6,36,48,12,42)) -->
+<!-- approx_cd_list_d <-  suppressWarnings(build_distance_frame(death_dat, -->
+<!--                                         horizon_list=target_horizon, -->
+<!--                                         target_list=target_var[1], -->
+<!--                                         approx_rule="approximation2", -->
+<!--                                         tau_F=q_set1,tau_G=q_set1)) -->
+<!-- # extract data -->
+<!-- total_frame_d <- approx_cd_list_d[[1]] -->
+
+<!-- #--------------- case forecast calculation----------------------# -->
+<!-- approx_cd_list_c <-  suppressWarnings(build_distance_frame(case_dat, -->
+<!--                                         horizon_list=target_horizon, -->
+<!--                                         target_list=target_var[2], -->
+<!--                                         approx_rule="approximation2", -->
+<!--                                         tau_F=q_set2,tau_G=q_set2)) -->
+<!-- # extract data -->
+<!-- total_frame_c <- approx_cd_list_c[[1]]  -->
+<!-- ## remove repeated entries -->
+<!-- total_frame_drm <- na.omit(total_frame_d) %>% -->
+<!--   # filter out same model pairs -->
+<!--   dplyr::filter(model_1 != model_2) %>% -->
+<!--   rowwise() %>% -->
+<!--   mutate(key = paste(sort(c(model_1, model_2)), collapse="")) %>% -->
+<!--   distinct(key, approx_cd, horizon, location, target_end_date, .keep_all=T) %>% -->
+<!--   select(-key) -->
+
+<!-- total_frame_crm <- na.omit(total_frame_c) %>% -->
+<!--   # filter out same model pairs -->
+<!--   dplyr::filter(model_1 != model_2) %>% -->
+<!--   rowwise() %>% -->
+<!--   mutate(key = paste(sort(c(model_1, model_2)), collapse="")) %>% -->
+<!--   distinct(key, approx_cd, horizon, location, target_end_date, .keep_all=T) %>% -->
+<!--   select(-key) -->
+<!-- ``` -->
+
+<!-- There are 9 models that fulfilled the criteria for the 5 locations with highest cumulative deaths. Below is an example of approximated Cramér distances between COVIDhub-ensemble and Karlen-pypm for 1-4 week ahead forecasts of incident deaths in CA in the week of 01/11/2021.  -->
+
+<!-- ```{r,cache=TRUE} -->
+<!-- # proof of concept -->
+<!-- fdat <- load_forecasts(models = c("COVIDhub-baseline","Karlen-pypm"), -->
+<!--                               dates = c("2020-10-31","2021-01-11","2021-05-08"), -->
+<!--                               source = "zoltar", -->
+<!--                               date_window_size = 6, -->
+<!--                               locations = "12", -->
+<!--                               types = c("quantile", "point"), -->
+<!--                               verbose = FALSE, -->
+<!--                               targets = paste(1:4, "wk ahead inc death")) -->
+
+<!-- p <- plot_forecasts(fdat, -->
+<!--                target_variable = "inc death", -->
+<!--                truth_source = "JHU", -->
+<!--                intervals = c(.95), -->
+<!--                facet = model~., -->
+<!--                fill_by_model = TRUE, -->
+<!--                facet_ncol=1, -->
+<!--                plot=FALSE, -->
+<!--                title="none", -->
+<!--                subtitle="none", -->
+<!--                show_caption=FALSE) -->
+
+<!-- p_formatted <- p + -->
+<!--   scale_x_date(name=NULL, date_breaks = "1 months", date_labels = "%b-%y", -->
+<!--                limits = c(as.Date("2020-10-17"), as.Date("2021-09-04")))+ -->
+<!--   theme(axis.text.x = element_text(angle=90, hjust=-0.2), -->
+<!--         legend.position = "none") -->
+
+<!-- for(i in 1:4){ -->
+<!--     p <-  death_dat %>% -->
+<!--       dplyr::filter(horizon==i, -->
+<!--                     target_end_date==as.Date("2021-01-16")+(7*(i-1)), -->
+<!--                     location=="12")  %>% -->
+<!--       .[,grep("COVIDhub.baseline|Karlen.pypm|quantile",colnames(death_dat))] -->
+<!--     assign(paste0("p",i), -->
+<!--            plot_step(p,"COVIDhub.baseline","Karlen.pypm",i) -->
+<!--            ) -->
+<!-- } -->
+<!-- legend = gtable_filter(ggplot_gtable(ggplot_build(p1)), "guide-box") -->
+
+<!-- ### cases -->
+<!-- fdat_c <- load_forecasts(models = c("COVIDhub-baseline","Karlen-pypm"), -->
+<!--                               dates = c("2020-10-31","2021-01-11","2021-05-08"), -->
+<!--                               source = "zoltar", -->
+<!--                               date_window_size = 6, -->
+<!--                               locations = "48", -->
+<!--                               types = c("quantile", "point"), -->
+<!--                               verbose = FALSE, -->
+<!--                               targets = paste(1:4, "wk ahead inc death")) -->
+
+<!-- p_c <- plot_forecasts(fdat_c, -->
+<!--                target_variable = "inc death", -->
+<!--                truth_source = "JHU", -->
+<!--                intervals = c(.95), -->
+<!--                facet = model~., -->
+<!--                fill_by_model = TRUE, -->
+<!--                facet_ncol=1, -->
+<!--                plot=FALSE, -->
+<!--                title="none", -->
+<!--                subtitle="none", -->
+<!--                show_caption=FALSE) -->
+
+<!-- p_formatted_c <- p_c + -->
+<!--   scale_x_date(name=NULL, date_breaks = "1 months", date_labels = "%b-%y", -->
+<!--                limits = c(as.Date("2020-10-17"), as.Date("2021-09-04")))+ -->
+<!--   theme(axis.text.x = element_text(angle=90, hjust=-0.2), -->
+<!--         legend.position = "none") -->
+
+<!-- for(i in 1:4){ -->
+<!--     pc <-  case_dat %>% -->
+<!--       dplyr::filter(horizon==i, -->
+<!--                     target_end_date==as.Date("2021-01-16")+(7*(i-1)), -->
+<!--                     location=="48")  %>% -->
+<!--       .[,grep("COVIDhub.baseline|Karlen.pypm|quantile",colnames(case_dat))] -->
+<!--     assign(paste0("pc",i), -->
+<!--            plot_step(pc,"COVIDhub.baseline","Karlen.pypm",i) -->
+<!--            ) -->
+<!-- } -->
+<!-- legend_c = gtable_filter(ggplot_gtable(ggplot_build(pc1)), "guide-box") -->
+<!-- ``` -->
+
+<!-- ```{r,fig.align='center',out.width='80%',out.height='80%'} -->
+<!-- # grid.arrange(p_formatted,p1,p2,p3,p4, layout_matrix = lay) -->
+<!-- grid.arrange(p_formatted,  -->
+<!--              arrangeGrob(p1 + theme(legend.position="none"), -->
+<!--                          p2 + theme(legend.position="none"),  -->
+<!--                          p3 + theme(legend.position="none"), -->
+<!--                          p4 + theme(legend.position="none"), -->
+<!--                          legend, -->
+<!--                          heights=c(1,1,1,1, 0.3), -->
+<!--                          ncol = 1), -->
+<!--              ncol=2,top = "Location: FL, Forecast date: 2020-10-31, 2021-01-11, 2021-05-08") -->
+<!-- ``` -->
+
+<!-- ```{r,fig.align='center',out.width='80%',out.height='80%'} -->
+<!-- # grid.arrange(p_formatted,p1,p2,p3,p4, layout_matrix = lay) -->
+<!-- grid.arrange(p_formatted_c,  -->
+<!--              arrangeGrob(pc1 + theme(legend.position="none"), -->
+<!--                          pc2 + theme(legend.position="none"),  -->
+<!--                          pc3 + theme(legend.position="none"), -->
+<!--                          pc4 + theme(legend.position="none"), -->
+<!--                          legend_c, -->
+<!--                          heights=c(1,1,1,1, 0.3), -->
+<!--                          ncol = 1), -->
+<!--              ncol=2,top = "Location: FL, Forecast date: 2020-10-31, 2021-01-11, 2021-05-08") -->
+<!-- ``` -->
+
+<!-- ## Similarity (focusing on the beginnings and peaks of COVID waves) -->
+
+<!-- ```{r} -->
+<!-- distance_heatmap(total_frame_d,"Mean CD - FL",metadata=NULL,"12") -->
+<!-- distance_heatmap(total_frame_d,"Mean CD - TX",metadata=NULL,"48") -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- fl <- truth_plot(truth_dat, "inc death", "12","2020-11-07","2021-07-10") -->
+<!-- tx <- truth_plot(truth_dat, "inc death", "48","2020-10-24","2021-07-10") -->
+<!-- grid.arrange(fl,tx,ncol=1) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- # make combined data  -->
+<!-- truth_dat_d <- truth_dat %>% -->
+<!--   dplyr::filter(target_variable=="inc death") %>% -->
+<!--   dplyr::select(location,target_end_date,value) %>% -->
+<!--   dplyr::mutate(value=ifelse(value<0,0,value)) -->
+<!-- combox_d <- total_frame_drm %>% -->
+<!--   dplyr::mutate(target_end_date = as.character(as.Date(target_end_date,origin="1970-01-01"))) %>% -->
+<!--   dplyr::left_join(truth_dat_d, by = c("target_end_date", "location"))  -->
+
+<!-- # plot -->
+<!-- point_cd(combox_d,model1=c("COVIDhub.baseline","COVIDhub.ensemble"), -->
+<!--         model2=c("Karlen.pypm","UMass.MechBayes"),loc="12","Similarity - Death Forecasts - FL", -->
+<!--         scale=FALSE,"2020-11-07","2021-07-10") -->
+<!-- ``` -->
+<!-- Combine all lead time into one? -->
+
+<!-- ```{r} -->
+<!-- # make combined data -->
+<!-- combox_d2 <- total_frame_drm %>% -->
+<!--   dplyr::mutate(target_end_date = as.character(as.Date(target_end_date,origin="1970-01-01"))) %>% -->
+<!--   dplyr::left_join(truth_dat_d, by = c("target_end_date", "location")) -->
+<!-- check <-point_cd(combox_d2,model1=c("COVIDhub.baseline","COVIDhub.ensemble"), -->
+<!--         model2=c("Karlen.pypm","UMass.MechBayes"),loc="48","Similarity - Death Forecasts - TX", -->
+<!--         scale=FALSE,"2020-10-24","2021-07-10") -->
+<!-- # plot -->
+<!-- point_cd(combox_d2,model1=c("COVIDhub.baseline","COVIDhub.ensemble"), -->
+<!--         model2=c("Karlen.pypm","UMass.MechBayes"),loc="48","Similarity - Death Forecasts - TX", -->
+<!--         scale=FALSE,"2020-10-24","2021-07-10") -->
+<!-- ``` -->
+
+<!-- ## Correlation between WIS and SD of Approx. CD -->
+
+<!-- Assumption is that higher SD is correlated with worse WIS. Predictability? -->
+
+<!-- ## Consistency/stability of models and ensemble  -->
+
+<!-- ## Decomposition of Approximated Cramer Distance  -->
+
+<!-- The Cramer distance is commonly used to measure the similarity of forecast distributions (see Richardson et al 2020 for a recent application). Now assume that for each of the distributions $F$ and $G$ we only know $K$ quantiles at equally spaced levels $1/(K + 1), 2/(K + 1), \dots, K/(K + 1)$. Denote these quantiles by $q^F_1, \dots, q^F_K$ and $q^G_1, \dots, q^G_K$, respectively. This CRPS approximation given by \eqref{linear_quantile_scores} is equivalent to the weighted interval score (WIS) which is in use for evaluation of quantile forecasts at the Forecast Hub, see Section 2.2 of Bracher et al (2021). This approximation can be generalized to the Cramer distance as -->
+<!-- \begin{equation} -->
+<!-- \text{CD}(F, G) \approx \frac{1}{K(K + 1)}\sum_{i = 1}^K\sum_{j = 1}^K \mathbf{1}\{(i - j) \times (q^F_i - q^G_j) \leq 0\} \times \left| q^F_i - q^G_j\right|,\label{eq:approx_cd} -->
+<!-- \end{equation} -->
+<!-- This can be seen as a sum of penalties for \textit{incompatibility} of predictive quantiles. Whenever the predictive quantiles $q_i^F$ and $q_j^G$ are incompatible in the sense that they imply $F$ and $G$ are different distributions (e.g. because $q_F^i > q_G^j$ despite $i < j$ or $q_F^i \neq q_G^j$ despite $i = j$), a penalty $\left| q^F_i - q^G_j\right|$ is added to the sum. This corresponds to the shift which would be necessary to make $q_F^i$ and $q_G^j$ compatible. -->
+
+<!-- ## A divergence measure for central prediction intervals with potentially different nominal coverages -->
+
+<!-- Consider two central prediction intervals $[l^F, u^F]$ and $[l^G, u^G]$ with nominal levels $\alpha^F$ and $\alpha^G$, respectively (meaning that $l^F$ is the $(1 - \alpha^F)/2$ quantile of $F$ etc). We can define an \textit{interval divergence} measure by comparing the two pairs of predictive quantiles and summing up the respective incompatibility penalties as in \eqref{eq:approx_cd}. Adapting notation to the interval formulation and structuring the sum slightly differently, this can be written as: -->
+
+<!-- \begin{align*} -->
+<!-- \text{ID}([l^F, u^F], [l^G, u^G], \alpha^F, \alpha^G) = & \ \mathbf{1}(\alpha^F \leq \alpha^G)\times\left\{\max(l^G - l^F, 0) + \max(u^F - u^G, 0)\right\} \ +\\ -->
+<!-- & \ \mathbf{1}(\alpha^F \geq \alpha^G) \times \left\{\max(l^F - l^G, 0) + \max(u^G - u^F, 0)\right\} \ +\\ -->
+<!-- & \max(l^F - u^G, 0) \ +\\ -->
+<!-- & \max(l^G - u^F, 0) -->
+<!-- \end{align*} -->
+
+<!-- The first row adds penalties for the case where $[l^F, u^F]$ should be nested in $[l^G, u^G]$, but at least one of its ends is more extreme than the respective end of $[l^G, u^G]$. The second row covers the converse case. The last two rows add penalties if the lower end of one interval exceeds the upper end of the other, i.e. the intervals do not overlap. -->
+
+<!-- This can be seen as a (scaled version of a) generalization of the interval score, but writing out the exact relationship is a bit tedious. -->
+
+<!-- We now define four auxiliary terms with an intuitive interpretation which add up to the interval divergence: -->
+
+<!-- \begin{itemize} -->
+<!-- \item The term -->
+<!-- $$ -->
+<!-- D_F = \mathbf{1}(\alpha^F \leq \alpha^G)\times\max\{(u^F - l^F) - (u^G - l^G), 0\} -->
+<!-- $$ -->
+<!-- is the sum of penalties resulting from $F$ being more dispersed than $G$. It is positive whenever the interval $[l^F, u^F]$ is longer than $[l^G, u^G]$, even though it should be nested in the latter. $D_F$ then tells us by how much we would need to shorten $[l^F, u^F]$ so it could fit into $[l^G, u^G]$. -->
+<!-- \item The term -->
+<!-- $$ -->
+<!-- D_G = \mathbf{1}(\alpha^G \leq \alpha^G)\times\max\{(u^G - l^G) - (u^F - l^F), 0\} -->
+<!-- $$ -->
+<!-- measures the converse, i.e. overdispersion of $G$ relative to $F$. -->
+<!-- \item The term -->
+<!-- $$ -->
+<!-- S^F = \max\{\mathbf{1}(\alpha^G \leq \alpha^F) \times \max(l^F - l^G, 0) + \mathbf{1}(\alpha^F \leq \alpha^G) \times \max(u^F - u^G, 0) + \max(l^F - u^G, 0) - D_F - D_G, 0\} -->
+<!-- $$ -->
+<!-- sums over penalties for values in $\{l^F, u^F\}$ exceeding those from $\{l^G, u^G\}$ where they should not (only counting penalties not already covered in $D_F$ or $D_G$). It thus represents an \textit{upward shift} of $F$ relative to $G$. -->
+<!-- \item The term -->
+<!-- $$ -->
+<!-- S^G = \max\{\mathbf{1}(\alpha^F \leq \alpha^G) \times \max(l^G - l^F, 0) + \mathbf{1}(\alpha^G \leq \alpha^F) \times \max(u^G - u^F, 0) + \max(l^G - u^F, 0) - D_G - D_F, 0\} -->
+<!-- $$ -->
+<!-- accordingly represents an \textit{upward shift} of $G$ relative to $F$. -->
+<!-- \end{itemize} -->
+
+<!-- It can be shown that -->
+<!-- $$ -->
+<!-- \text{ID}([l^F, u^F], [l^G, u^G], \alpha^F, \alpha^G) = D_F + D_G + S^F + S^G -->
+<!-- $$ -->
+<!-- Intuitively the interval divergence measures by how much we need to move the quantiles of the interval with lower nominal coverage so it fits into the one with larger nominal coverage. -->
+
+
+<!-- ## Approximating the Cramer distance using interval divergences -->
+
+<!-- Assuming $K$ is even, the $K$ equally spaced predictive quantiles of each distribution can seen as $L = K/2$ central prediction intervals with coverage levels $\alpha_i = 2i/(L + 1), i = 1, \dots, L$. Similarly to the definition of the WIS, the approximation \eqref{eq:approx_cd} can also be expressed in terms of these intervals as -->
+
+<!-- $$ -->
+<!-- \text{CD}(F, G) \approx \frac{1}{2L(2L + 1)}\sum_{k = 1}^L\sum_{m = 1}^L \text{ID}([l^F_k, u^F_k], [l^G_m, u^G_m], \alpha_k^F, \alpha_m^G). -->
+<!-- $$ -->
+<!-- This implies a decomposition of the Cramer distance into the four interpretable components defined for the interval divergence in the previous section. If $G$ is a one-point distribution, the CD reduces to the WIS and the proposed decomposition reduces to the well-known decomposition of the WIS into dispersion, overprediction and underprediction components. -->
+
+<!-- Note that in practice we usually have an uneven rather than even number $K$ of predictive quantiles. In this case the median needs to be treated separately (comparisons of the ``0% prediction interval'' need to be weighted down with a factor of 2; this is the same little quirk as the one identified by Ryan and Evan for the WIS a few months ago). -->
+<!-- The decomposition has the following properties: -->
+<!-- \begin{itemize} -->
+<!-- \item Additive shifts of the two distributions only affect the shift components, not the dispersion components. -->
+<!-- \item Consequently, if $G$ and $G$ are identical up to an additive shift, both dispersion components will be 0. -->
+<!-- \item If $F$ and $G$ are both symmetric and have the same median, the both shift components will be 0. -->
+<!-- \item I think that in general it is possible that both shift components or both dispersion components are greater than 0, which leads to a somewhat strange interpretation. But this should only concern constructed examples. -->
+<!-- \end{itemize} -->
+
+<!-- ## Decomposition Preliminaries -->
+
+
+<!-- ### Motivation of the approximation -->
+
+<!-- We start by splitting up the sum from \eqref{eq:approx_cd} into -->
+<!-- \begin{align} -->
+<!-- \text{CD}(F, G) & \approx \frac{1}{K(K + 1)}\sum_{i = 1}^K\sum_{j = 1}^K 2 \times \mathbf{1}\{i \leq j \land q^F_i > q^G_j\} \times \left( q^F_i - q^G_j\right) \label{eq:two_sums} \\ -->
+<!-- & \ \ \ \ + \ \ \ \frac{1}{K(K + 1)}\sum_{i = 1}^K\sum_{j = 1}^K 2 \times \mathbf{1}\{i \geq j \land q^F_i < q^G_j\} \times \left( q^G_j - q^F_i\right) \nonumber -->
+<!-- \end{align} -->
+<!-- We now denote by $q_1 \leq q_2 \leq \dots \leq q_{2n}$ the pooled set of quantiles (across $F$ and $G$). Further, we denote by $r^F_1, \dots r^F_n$ and $r^G_1, \dots r^G_n$ the ranks of the members of $q^F_1, \dots, q^F_n$ and $q^G_1, \dots, q^G_n$, respectively, within the pooled set of quantiles, i.e. -->
+<!-- \begin{equation} -->
+<!-- q^F_i = q_{r^F_i}.\label{eq:substitution} -->
+<!-- \end{equation} -->
+<!-- Note that ranks are oriented such that larger ranks correspond to larger values. We now focus on the first of the two double sums from equation \eqref{eq:two_sums}, which using \eqref{eq:substitution} becomes -->
+<!-- \begin{align} -->
+<!-- % & \frac{1}{K(K + 1)}\sum_{i = 1}^K\sum_{j = 1}^K 2 \times \mathbf{1}\{i \leq j \land q^F_i > q^G_j\} \times \left( q^F_i - q^G_j\right) \\ -->
+<!-- \frac{1}{K(K + 1)}\sum_{i = 1}^K\sum_{j = 1}^K 2 \times \mathbf{1}\{i \leq j \land r^F_i > r^G_j\} \times \left( q_{r^F_i} - q_{r^G_j}\right). \label{eq:to_continue} -->
+<!-- \end{align} -->
+<!-- Now denote by -->
+<!-- $$ -->
+<!-- \delta_l = q_{l + 1} - q_l -->
+<!-- $$ -->
+<!-- the increments in the pooled set of quantiles. We can then use a telescope sum and continue \eqref{eq:to_continue} as -->
+<!-- \begin{align} -->
+<!-- % & \frac{1}{K(K + 1)}\sum_{i = 1}^K\sum_{j = 1}^K 2 \times \mathbf{1}\{i \leq j \land r^F_i > r^G_j\} \times \left( q_{r^F_i} - q_{r^G_j}\right)\\ -->
+<!-- = & \frac{1}{K(K + 1)}\sum_{i = 1}^K\sum_{j = 1}^K 2 \times \mathbf{1}\{i \leq j \land r^F_i > r^G_j\} \times \sum_{l = r^G_j}^{r^F_{i - 1}} \delta_l\\ -->
+<!-- = & \frac{1}{K(K + 1)} \sum_{l = 1}^{K} \delta_l \times 2 \times \sum_{i = 1}^K\sum_{j = 1}^K \mathbf{1}\{i \leq j \land r^G_j \leq l < r^F_i\}. \label{eq:second_sum2}\\ -->
+<!-- \end{align} -->
+<!-- The double sum over the indicator function counts how many pairs of $(i, j)$ exist for a given $l$ such that $r^F_i$, but not $r^G_j$ exceeds $l$, despite $i \leq j$. To determine this number consider -->
+<!-- \begin{align} -->
+<!-- a^F_l & = \sum_{i = 1}^n \mathbf{1}(r^F_i \leq l)\\ -->
+<!-- a^G_l & = \sum_{i = 1}^n \mathbf{1}(r^G_i \leq l), -->
+<!-- \end{align} -->
+<!-- i.e., the numbers of ranks falling below $l$ among the quantiles of $F$ and $G$. If -->
+<!-- $$ -->
+<!-- a_l^F - a_l^G = b_l \Leftrightarrow a_l^G = a_l^F - b_l -->
+<!-- $$ -->
+<!-- we have -->
+<!-- \begin{align} -->
+<!-- r^F_{1} \leq \dots \leq r^F_{a_l^F} \leq l <  r^F_{a_l^F + 1} \leq \dots \leq r^F_n,\\ -->
+<!-- r^G_{1} \leq \dots \leq r^G_{a_l^F - b_l} \leq l <  r^F_{a_l^F - b_l + 1} \leq \dots \leq r^G_n. -->
+<!-- \end{align} -->
+<!-- The case $(i \leq j \land r^G_j \leq l < r^F_i)$ thus arises for -->
+<!-- \begin{itemize} -->
+<!-- \item[1.] the tuples $(r^F_{a^F_l}, r^G_{a^F_l}), (r^F_{a^F_l}, r^G_{a^F_l - 1}), \dots, (r^F_{a^F_l}, r^G_{a^F_l - (b_l - 1)})$, i.e. $b_l$ times for $r^F_{a^F_l}$. -->
+<!-- \item[2.] the tuples $(r^F_{a^F_l - 1}, r^G_{a^F_l - 1}), (r^F_{a^F_l}, r^G_{a^F_l - 1}), \dots, (r^F_{a^F_l}, r^G_{a^F_l - (b_l - 1)})$, i.e. $b_l - 1$ times for $r^F_{a^F_l - 1}$. -->
+<!-- \item[$\vdots$] -->
+<!-- \item[$b_l$.] the tuple $(r^F_{a^F_l - b_l}, r^G_{a^F_l - b_l})$, i.e. once for $r^F_{a^F_l - b_l}$. -->
+<!-- \end{itemize} -->
+<!-- This results in a total of $b_l + (b_l -1) + \dots + 1 = b_l(b_l + 1)/2$ tuples, and we can re-write expression \eqref{eq:second_sum2} as -->
+<!-- $$ -->
+<!-- = \frac{1}{K(K + 1)} \sum_{l = 1}^{K} \delta_l \times b_l(b_l + 1) \times \mathbf{1}(b_l > 0). -->
+<!-- $$ -->
+<!-- The same argument can be made for the second double sum in \eqref{eq:two_sums}, and bringing the two back together again the overall approximation from \eqref{eq:two_sums} simplifies to -->
+<!-- \begin{equation} -->
+<!-- \text{CD}(F, G) \approx \frac{1}{K(K + 1)} \sum_{l = 1}^{K} \delta_l \times b_l(b_l + 1). \label{eq:rectangles} -->
+<!-- \end{equation} -->
+<!-- For large $K$ we obviously have -->
+<!-- \begin{equation} -->
+<!-- F(q_l) - G(q_l) = \underbrace{\frac{a^F_l}{K} - \frac{a^G_l}{K}}_{= b_l/K} \approx \underbrace{\frac{a^F_l + 1}{K + 1} - \frac{a^G_l + 1}{K + 1}}_{(b_l + 1)/(K + 1)}, \label{eq:approx_CDF} -->
+<!-- \end{equation} -->
+<!-- meaning that \eqref{eq:rectangles} is a simple (left-sided) Riemann sum approximation of the Cramer divergence. -->
+
+<!-- There are more direct ways of approximating the Cramer divergence using quantiles, e.g., using $b_l^2$ rather than $b_l \times (b_l + 1)$ in \eqref{eq:rectangles}). The motivation for expression \eqref{eq:approx_cd} is that if $G$ is a point mass, the approximated Cramer divergence simplifies to the approximation \eqref{eq:linear_quantile_scores} already in use for the CRPS in the context of forecast evaluation. To see this consider equation \eqref{eq:two_sums}. With $q^G_1 = \dots = q^G_K = y$ it becomes -->
+<!-- \begin{align*} -->
+<!-- \text{CD}(F, G) & \approx \frac{1}{K(K + 1)}\sum_{i = 1}^K\sum_{j = 1}^K 2\times \mathbf{1}(i \leq j \land q^F_i > y) \times \left( q^F_i - y\right) \\ -->
+<!-- & \ \ \ \ + \ \ \ \frac{1}{K(K + 1)}\sum_{i = 1}^K\sum_{j = 1}^K 2 \times \mathbf{1}(i \geq j \land q^F_i < y) \times \left(y - q^F_i\right)\\ -->
+<!-- & = \frac{1}{K(K + 1)} \left\{\sum_{i = 1}^K 2\times \mathbf{1}(q^F_i > y) \times i \times \left( q^F_i - y\right) \ \ + \ \ \sum_{i = 1}^K 2 \times \mathbf{1}(q^F_i < y) \times (K + 1 - i) \times \left(y - q^F_i\right)\right\}\\ -->
+<!-- & = \frac{1}{K(K + 1)} \sum_{i = 1}^K 2\times \{\mathbf{1}(q^F_i > y) \times (K + 1) - i\} \times (q^F_i - y) \\ -->
+<!-- & = \frac{1}{K} \sum_{i = 1}^K 2\times \{\mathbf{1}(q^F_i > y) - i/(K + 1)\} \times (q^F_i - y). -->
+<!-- \end{align*} -->
+<!-- This is precisely the approximation of the CRPS from equation \eqref{eq:linear_quantile_scores}. -->
+
+<!-- ## Establishing a decomposition for the approximated Cramer distance -->
+
+<!-- We now introduce a decomposition of the approximated Cramer distance into the four following components: -->
+<!-- \begin{itemize} -->
+<!-- \item larger dispersion of $F$ relative to $G$, -->
+<!-- \item larger dispersion of $G$ relative to $F$, -->
+<!-- \item upward shift of $F$ relative to $G$, -->
+<!-- \item upward shift of $G$ relative to $F$. -->
+<!-- \end{itemize} -->
+<!-- This decomposition is inspired by the decomposition of the interval score which translates to the weighted interval score (WIS). To extend it to the approximated Cramer distance, we need to express it in terms of symmetric prediction intervals, similar to the definition of the WIS via the interval score. In the following we introduce such a representation and decomposition. -->
+
+<!-- ### A divergence measure for central prediction intervals with potentially different nominal coverages -->
+
+<!-- Consider two central prediction intervals $[l^F, u^F]$ and $[l^G, u^G]$ with nominal levels $\alpha^F, \alpha^G \in [0, 1)$, respectively; $l^F$ is thus the $(1 - \alpha^F)/2$ quantile of $F$, $u^F$ is the $(1 + \alpha^F)/2$ quantile of $F$ etc. Note that we include the boundary case $\alpha = 0$, even though it has somewhat peculiar behaviour. We can define an \textit{interval divergence} measure by comparing the two pairs of predictive quantiles and summing up the four resulting incompatibility penalties as in \eqref{eq:approx_cd}. Writing this out completely gives the somewhat unwieldy expression -->
+<!-- \begin{align*} -->
+<!-- \text{ID}([l^F, u^F], [l^G, u^G], \alpha^F, \alpha^G) = & \ \ \ \mathbf{1}\big\{\{(1 - \alpha^F)/2 \leq (1 - \alpha^G)/2 \land l^F > l^G\big\} \\ -->
+<!-- & \ \ \ \ \ \ \ \ \ \ \ \ \ \ \lor \{(1 - \alpha^F)/2 \geq (1 - \alpha^G)/2 \land l^F < l^G\}\} \times |l^F - l^G|\\ -->
+<!-- & \ \ \ \ \ \ \ \ \ \ + \ \mathbf{1}\big\{\{(1 - \alpha^F)/2 \leq (1 + \alpha^G)/2 \land l^F > u^G\big\} \\ -->
+<!-- & \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \lor \{(1 - \alpha^F)/2 \geq (1 + \alpha^G)/2 \land l^F < u^G\}\} \times |l^F - u^G|\\ -->
+<!-- & \ \ \ \ \ \ \ \ \ \ + \ \mathbf{1}\big\{\{(1 + \alpha^F)/2 \leq (1 - \alpha^G)/2 \land u^F > l^G\big\} \\ -->
+<!-- & \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \lor \{(1 + \alpha^F)/2 \geq (1 - \alpha^G)/2 \land u^F < l^G\}\} \times |u^F - l^G|\\ -->
+<!-- & \ \ \ \ \ \ \ \ \ \ + \ \mathbf{1}\big\{\{(1 + \alpha^F)/2 \leq (1 + \alpha^G)/2 \land u^F > u^G\big\} \\ -->
+<!-- & \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \lor \{(1 + \alpha^F)/2 \geq (1 + \alpha^G)/2 \land u^F < u^G\}\} \times |u^F - u^G|. -->
+<!-- \end{align*} -->
+<!-- By construction we know that if $\alpha^F > 0$ or $\alpha^G > 0$ we have $1 - \alpha^F < 1 + \alpha^G$ and $1 - \alpha^G < 1 + \alpha^F$ while $(1 - \alpha^F)/2 \leq (1 - \alpha^G)/2 \Leftrightarrow \alpha_F \geq \alpha^G \Leftrightarrow (1 + \alpha^F)/2 \geq (1 + \alpha^G)/2$ etc. In this case the above can thus be simplified considerably to -->
+<!-- \begin{align*} -->
+<!-- \text{ID}([l^F, u^F], [l^G, u^G], \alpha^F, \alpha^G) = & \ \mathbf{1}(\alpha^F \leq \alpha^G)\times\left\{\max(l^G - l^F, 0) + \max(u^F - u^G, 0)\right\} \\ -->
+<!-- & \ \ \ \ \ \ \ \ + \ \mathbf{1}(\alpha^F \geq \alpha^G) \times \left\{\max(l^F - l^G, 0) + \max(u^G - u^F, 0)\right\} \\ -->
+<!-- & \ \ \ \ \ \ \ \ + \max(l^F - u^G, 0) \ +\\ -->
+<!-- & \ \ \ \ \ \ \ \ + \max(l^G - u^F, 0). -->
+<!-- \end{align*} -->
+
+<!-- Here, the first row adds penalties for the case where $[l^F, u^F]$ should be nested in $[l^G, u^G]$, but at least one of its ends is more extreme than the respective end of $[l^G, u^G]$. The second row covers the converse case. The last two rows add penalties if the lower end of one interval exceeds the upper end of the other, i.e. the intervals do not overlap. This can be seen as a (scaled version of a) generalization of the interval score, but writing out the exact relationship is a bit tedious. -->
+
+<!-- If $\alpha^F = \alpha^G = 0$ we have -->
+<!-- $$ -->
+<!-- \text{ID}([l^F, u^F], [l^G, u^G], 0, 0) = 4 \times |m^F - m^G| -->
+<!-- $$ -->
+<!-- where $m^F = l^F = u^F$ and $m^G = l^G = u^G$ are the predictive medians of $F$ and $G$, respectively. -->
+
+<!-- We now define four auxiliary terms with an intuitive interpretation which add up to the interval divergence: -->
+
+<!-- \begin{itemize} -->
+<!-- \item The term -->
+<!-- $$ -->
+<!-- D_F = \mathbf{1}(\alpha^F \leq \alpha^G)\times\max\{(u^F - l^F) - (u^G - l^G), 0\} -->
+<!-- $$ -->
+<!-- is the sum of penalties resulting from $F$ being more dispersed than $G$. It is positive whenever the interval $[l^F, u^F]$ is longer than $[l^G, u^G]$, even though it should be nested in the latter. $D_F$ then tells us by how much we would need to shorten $[l^F, u^F]$ so it could fit into $[l^G, u^G]$. -->
+<!-- \item The term -->
+<!-- $$ -->
+<!-- D_G = \mathbf{1}(\alpha^G \leq \alpha^G)\times\max\{(u^G - l^G) - (u^F - l^F), 0\} -->
+<!-- $$ -->
+<!-- measures the converse, i.e. overdispersion of $G$ relative to $F$. Note that at most one of $D_F$ and $D_G$ can be positive. If $\alpha^F = \alpha^G = 0$ we always have $D^F = D^G = 0$. -->
+<!-- \item The term -->
+<!-- $$ -->
+<!-- S^F = \mathbf{1}\left\{l^F + u^F > l^G + u^G \right\} \times \left\{\text{ID}([l^F, u^F], [l^G, u^G], \alpha^F, \alpha^G) - D^F - D^G\right\} -->
+<!-- $$ -->
+<!-- % $$ -->
+<!-- % S^F = \max\{\mathbf{1}(\alpha^G \leq \alpha^F) \times \max(l^F - l^G, 0) + \mathbf{1}(\alpha^F \leq \alpha^G) \times \max(u^F - u^G, 0) + \max(l^F - u^G, 0) - D_F - D_G, 0\} -->
+<!-- % $$ -->
+<!-- represents an \textit{upward shift} of $F$ relative to $G$. It is zero unless the center of $[l^F + u^F]$ exceeds that of $[l^G + u^G]$, in which case it absorbs the remaining penalties after accounting for differences in dispersion via $D^F$ and $D^G$. -->
+<!-- \item The term -->
+<!-- $$ -->
+<!-- S^G = \mathbf{1}\left\{l^F + u^F < l^G + u^G\right\} \times \left\{\text{ID}([l^F, u^F], [l^G, u^G], \alpha^F, \alpha^G) - D^F - D^G\right\} -->
+<!-- $$ -->
+<!-- % $$ -->
+<!-- % S^G = \max\{\mathbf{1}(\alpha^F \leq \alpha^G) \times \max(l^G - l^F, 0) + \mathbf{1}(\alpha^G \leq \alpha^F) \times \max(u^G - u^F, 0) + \max(l^G - u^F, 0) - D_G - D_F, 0\} -->
+<!-- % $$ -->
+<!-- accordingly represents an \textit{upward shift} of $G$ relative to $F$. Again note that at most one out of $S^F$ and $S^G$ can be positive. -->
+<!-- \end{itemize} -->
+
+<!-- It is easy to see that -->
+<!-- $$ -->
+<!-- \text{ID}([l^F, u^F], [l^G, u^G], \alpha^F, \alpha^G) = D^F + D^G + S^F + S^G. -->
+<!-- $$ -->
+<!-- Intuitively the interval divergence measures by how much we need to move the quantiles of the interval with lower nominal coverage so it fits into the one with larger nominal coverage. The different components correspond to different types of moves we can make to achieve this We illustrate this using an example: Assume $[l^F, u^F]$ has lower nominal coverage than $[l^G, u^G]$, but is wider while $l^F > u^G$ (i.e.,\ the intervals are non-overlapping): -->
+
+<!-- \bigskip -->
+
+<!-- \begin{tikzpicture}[x=1cm,y=0.28cm] -->
+<!-- \draw[-] (1, 1) -- (4, 1); -->
+<!-- \draw[-] (1, 0.7) -- (1, 1.3); -->
+<!-- \draw[black,fill=white](1,0) node {$l^G$}; -->
+<!-- \draw[-] (4, 0.7) -- (4, 1.3); -->
+<!-- \draw[black,fill=white](4,0) node {$u^G$}; -->
+
+<!-- \draw[-] (5, 4) -- (11, 4); -->
+<!-- \draw[-] (5, 3.7) -- (5, 4.3); -->
+<!-- \draw[black,fill=white](5,3) node {$l^F$}; -->
+<!-- \draw[-] (11, 3.7) -- (11, 4.3); -->
+<!-- \draw[black,fill=white](11,3) node {$u^F$}; -->
+<!-- \end{tikzpicture} -->
+
+<!-- To fit $[l^F, u^F]$ into $[l^G, u^G]$ we first need to shorten it by $D^F = (u^F - l^F) - (u^G - l^G)$. We perform this shortening at the end which is furthest from $[l^G, u^G]$: -->
+
+<!-- \begin{tikzpicture}[x=1cm,y=0.28cm] -->
+<!-- \draw[-] (1, 1) -- (4, 1); -->
+<!-- \draw[-] (1, 0.7) -- (1, 1.3); -->
+<!-- \draw[black,fill=white](1,0) node {$l^G$}; -->
+<!-- \draw[-] (4, 0.7) -- (4, 1.3); -->
+<!-- \draw[black,fill=white](4,0) node {$u^G$}; -->
+
+<!-- \draw[-, dotted] (5, 4) -- (11, 4); -->
+<!-- \draw[-] (5, 4) -- (8, 4); -->
+<!-- \draw[-] (5, 3.7) -- (5, 4.3); -->
+<!-- \draw[-] (8, 3.7) -- (8, 4.3); -->
+<!-- \draw[black,fill=white](5,3) node {$l^F$}; -->
+<!-- \draw[-] (11, 3.7) -- (11, 4.3); -->
+<!-- \draw[black,fill=white](11,3) node {$u^F$}; -->
+
+<!-- \draw[->] (11, 4.0) arc (-155:-35:-1.7) ; -->
+
+<!-- \end{tikzpicture} -->
+<!-- Then we shift both ends of the resulting interval just onto the upper end $u^G$ of the interval with larger nominal coverage: -->
+<!-- \begin{tikzpicture}[x=1cm,y=0.28cm] -->
+<!-- \draw[-] (1, 1) -- (4, 1); -->
+<!-- \draw[-] (1, 0.7) -- (1, 1.3); -->
+<!-- \draw[black,fill=white](1,0) node {$l^G$}; -->
+<!-- \draw[-] (4, 0.7) -- (4, 1.3); -->
+<!-- \draw[black,fill=white](4,0) node {$u^G$}; -->
+
+<!-- \draw[-, dotted] (5, 4) -- (8, 4); -->
+<!-- \draw[-] (5, 3.7) -- (5, 4.3); -->
+<!-- \draw[-] (8, 3.7) -- (8, 4.3); -->
+<!-- \draw[black,fill=white](5,3) node {$l^F$}; -->
+
+<!-- \draw[->] (8, 4.0) arc (-155:-35:-2.3) ; -->
+<!-- \draw[->] (5, 4.0) arc (-155:-35:-.55) ; -->
+
+<!-- \draw[-] (4, 3.7) -- (4, 4.3); -->
+
+<!-- \end{tikzpicture} -->
+<!-- The sum of the two necessary shifts (of the upper and lower end), which in this case simplifies to $S^F = 2l^F - u^G -l^G$ can be interpreted as the upward shift of $[l^F, u^F]$ with respect to $l^G, u^G]$. -->
+
+<!-- ### Approximating the Cramer distance using interval divergences -->
+
+<!-- Assuming $K$ is even, the $K$ equally spaced predictive quantiles of each distribution can seen as $L = K/2$ central prediction intervals with coverage levels $\alpha_i = 2i/(L + 1), i = 1, \dots, L$. Similarly to the definition of the WIS, the approximation \eqref{eq:approx_cd} can also be expressed in terms of these intervals as -->
+<!-- $$ -->
+<!-- \text{CD}(F, G) \approx \frac{1}{2L(2L + 1)}\sum_{k = 1}^L\sum_{m = 1}^L 2 \times \text{ID}([l^F_k, u^F_k], [l^G_m, u^G_m], \alpha_k^F, \alpha_m^G). -->
+<!-- $$ -->
+<!-- This is easily seen as the involved double sum runs over the same discrepancy penalties as the one in equation \eqref{eq:approx_cd}, with four of them covered in each of the computed interval divergences. -->
+
+<!-- If $K$ is uneven, we get $L = (2K + 1)/2$ central prediction intervals for each distribution, with coverage levels $\alpha_i = 2(i - 1)/(L + 1), i = 1, \dots, L$. This means that the innermost prediction interval is just a single point at the predictive median. To avoid penalizing incompatibilities involving one of the medians more than once we then need to adjust the above to -->
+<!-- \begin{equation} -->
+<!-- \text{CD}(F, G) \approx \frac{1}{(2L - 0.5)(2L + 0.5)}\sum_{k = 1}^L\sum_{m = 1}^L w_{km}\text{ID}([l^F_k, u^F_k], [l^G_m, u^G_m], \alpha_k^F, \alpha_m^G). -->
+<!-- \end{equation} -->
+<!-- with -->
+<!-- $$ -->
+<!-- w_{km} = \begin{cases} 1/4 & \text{ if } k = 0 = m \\ -->
+<!-- 1/2 & \text{ if } k = 0 \neq m \text{ or } k = 0 \neq m\\ -->
+<!-- 1 & \text{else} -->
+<!-- \end{cases}. -->
+<!-- $$ -->
+
+<!-- This representation implies a decomposition of the Cramer distance into the four interpretable components defined for the interval divergence in the previous section. Each component is just defined as the (appropriately weighted) average of the respective components at the different coverage levels. If $G$ is a one-point distribution, the CD reduces to the WIS and the proposed decomposition reduces to the well-known decomposition of the WIS into dispersion, overprediction and underprediction components. The decomposition has the following further properties: -->
+
+<!-- \begin{itemize} -->
+<!-- \item Additive shifts of the two distributions affect the shift components, but not the dispersion components. -->
+<!-- \item Consequently, if $G$ and $G$ are identical up to an additive shift, both dispersion components will be 0. -->
+<!-- \item If $F$ and $G$ are both symmetric and have the same median, both shift components will be 0. -->
+<!-- \item It is possible that both shift components or both dispersion components are greater than 0, which leads to a somewhat strange interpretation. This corresponds to CDFs which cross more than once. -->
+<!-- \end{itemize} -->
+
+
+# Examples
+
+```{r}
+# q_F: vector containing the (1:K)/(K + 1) quantiles of F
+# q_G: vector containing the (1:K)/(K + 1) quantiles of G
+approx_cd1 <- function(q_F, q_G){
+
+  # compute quantile levels from length of provided quantile vectors:
+  K <- length(q_F)
+  if(length(q_G) != K) stop("q_F and q_G need to be of the same length")
+  p <- (1:K)/(K + 1) # function assumes that the quantile levels are equally spaced
+
+  # pool quantiles:
+  q0 <- c(q_F, q_G)
+  # vector of grouping variables, with 1 for values belonging to F, -1 for values
+  # belonging to G
+  a0 <- c(rep(1, length(q_F)), rep(-1, length(q_G)))
+
+  # re-order both vectors:
+  q <- q0[order(q0)]
+  a <- a0[order(q0)]
+  # and compute "how many quantiles ahead" F or G is at a given segment:
+  b <- abs(cumsum(a))
+
+  # compute the lengths of segments defined by sorted quantiles:
+  diffs_q <- c(diff(q), 0) # zero necessary for indexing below, but we could put
+  # anything (gets multiplied w zero)
+
+  # and approximate CD
+  cvm <- sum(diffs_q*b*(b + 1))/(K + 1)/(K)
+
+  # return(mean(cvm))
+  return(cvm)
+}
+
+# q_F: vector containing the (1:K)/(K + 1) quantiles of F
+# q_G: vector containing the (1:K)/(K + 1) quantiles of G
+approx_cd2 <- function(q_F, q_G){
+
+  # compute quantile levels from length of provided quantile vectors:
+  K <- length(q_F)
+  if(length(q_G) != K) stop("q_F and q_G need to be of the same length")
+  p <- (1:K)/(K + 1) # function assumes that the quantile levels are equally spaced
+
+  # pool quantiles:
+  q0 <- c(q_F, q_G)
+  # vector of grouping variables, with 1 for values belonging to F, -1 for values
+  # belonging to G
+  a0 <- c(rep(1, length(q_F)), rep(-1, length(q_G)))
+
+  # re-order both vectors:
+  q <- q0[order(q0)]
+  a <- a0[order(q0)]
+  # and compute "how many quantiles ahead" F or G is at a given segment:
+  b <- abs(cumsum(a))
+
+  # compute the lengths of segments defined by sorted quantiles:
+  diffs_q <- c(diff(q), 0) # zero necessary for indexing below, but we could put
+  # anything (gets multiplied w zero)
+
+  # and approximate CD
+  cvm <- sum(diffs_q*b^2/K^2)
+
+  return(mean(cvm))
+}
+approx_cd_uneq <- function(q_F, tau_F, q_G, tau_G, approx_rule="left-sided"){
+# check rules
+    if (!(approx_rule %in% c("left-sided", "trapezoid"))) {
+      stop("invalid approximation rule")
+    }
+    # check quantile order
+    q_F_ordered <- sort(q_F)
+    q_G_ordered <- sort(q_G)
+    if (sum(q_F != q_F_ordered)>0) {
+      warning("q_F has been re-ordered to correspond to increasing probability levels")
+    }
+    if (sum(q_G != q_G_ordered)>0) {
+      warning("q_G has been re-ordered to correspond to increasing probability levels")
+    }
+    # check probability level order
+    tau_F_ordered <- sort(tau_F)
+    tau_G_ordered <- sort(tau_G)
+    if (sum(tau_F != tau_F_ordered)>0) {
+      warning("tau_F has been sorted to in an increasing order")
+    }
+    if (sum(tau_G != tau_G_ordered)>0) {
+      warning("tau_G has been sorted to in an increasing order")
+    }
+    # check conditions
+    if (length(q_F_ordered) != length(tau_F_ordered)) {
+      stop("The lengths of q_F_ordered and tau_F_ordered need to be equal")
+    }
+    if (length(q_G_ordered) != length(tau_G_ordered)) {
+      stop("The lengths of q_G_ordered and tau_G_ordered need to be equal")
+    }
+    if (sum(tau_F_ordered<=1)!=length(tau_F_ordered)|sum(tau_F_ordered>=0)!=length(tau_F_ordered)) {
+      stop("The values of tau_F_ordered have to be between 0 and 1")
+    }
+    if (sum(tau_G_ordered<=1)!=length(tau_G_ordered)|sum(tau_G_ordered>=0)!=length(tau_G_ordered)) {
+      stop("The values of tau_G_ordered have to be between 0 and 1")
+    }
+    if (length(q_F_ordered) != length(q_G_ordered)) {
+      message("The lengths of q_F_ordered and q_G_ordered are not equal")
+    }
+    N <- length(q_F_ordered)
+    M <- length(q_G_ordered)
+    # pool quantiles:
+    q0 <- c(q_F_ordered, q_G_ordered)
+    # indicator whether the entry is from F or G
+    q <- q0[order(q0)]
+    tf <- unlist(sapply(q, function(x) ifelse(x %in% q_F_ordered,tau_F_ordered[which(x == q_F_ordered)],0)))
+    tg <- unlist(sapply(q, function(x) ifelse(x %in% q_G_ordered,tau_G_ordered[which(x == q_G_ordered)],0)))
+    diffs_q <- diff(q)
+    # probability level vectors
+    tau_F_v <- cummax(tf)
+    tau_G_v <- cummax(tg)
+    if (approx_rule == "left-sided") {
+      cvm <-
+        sum(((tau_F_v[1:(N + M) - 1] - tau_G_v[1:(N + M) - 1]) ^ 2) * diffs_q)
+    } else if (approx_rule == "trapezoid") {
+      cvm <-
+        sum((((tau_F_v[1:(N + M) - 1] - tau_G_v[1:(N + M) - 1]) ^ 2 + (tau_F_v[2:(N +
+                                                                                    M)] - tau_G_v[2:(N + M)]) ^ 2
+        ) / 2) * diffs_q)
+    }
+    return(cvm)
+}
+```
+
+<!-- ## Equally-spaced intervals -->
+## First example
+
+```{r ex1, fig.height=6, fig.width=8}
+grid_x <- seq(from = 3, to = 15, by = 0.1)
+
+mu_F <- 9
+sigma_F <- 1.8
+p_F <- pnorm(grid_x, mu_F, sigma_F)
+
+mu_G <- 10
+sigma_G <- 1
+p_G <- pnorm(grid_x, mu_G, sigma_G)
+
+y <- mu_G
+p_y <- as.numeric(grid_x > y)
+
+par(mfrow = c(2, 2), mai = c(0.5, 0.5, 0.2, 0.2))
+
+plot(grid_x, p_F, type = "l", xlab = "x", ylab = "CDF", col = "red")
+lines(grid_x, p_G, col = "blue")
+legend("topleft", c("F", "G"), col = c("red", "blue"), lty = 1)
+
+plot(grid_x, (p_F - p_G)^2, type = "l", xlab = "x", ylab = "(F(x) - G(x))^2", ylim = c(0, 0.2))
+polygon(grid_x, (p_F - p_G)^2, col = "lightblue")
+legend("topleft", "CD", col = "lightblue", pch = 15)
+
+detail_stepfun_cdf <- function(x, p, from, to, by = 0.1){
+  x_detailed <- seq(from = from, to = to, by = by)
+  p_detailed <- 0*x_detailed
+  for(i in seq_along(x)){
+    p_detailed[x_detailed >= x[i]] <- p[i]
+  }
+  return(list(x = x_detailed, p = p_detailed))
+}
+
+p_10 <- 1:11/12 # quantile levels
+# p_10 <- c(0.01,0.025,seq(0.05,0.95,0.05),0.975,0.99) # quantile levels
+
+q_F_10 <- qnorm(p_10, mu_F, sigma_F) # quantiles of F
+q_G_10 <- qnorm(p_10, mu_G, sigma_G) # quantiles of G
+
+q_F_10_detailed <- detail_stepfun_cdf(q_F_10, p_10, from = 3, to = 15)
+q_G_10_detailed <- detail_stepfun_cdf(q_G_10, p_10, from = 3, to = 15)
+p_10_detailed <- q_F_10_detailed$x
+
+plot(q_F_10_detailed$x, q_F_10_detailed$p, type = "s", xlab = "x", ylab = "CDF", col = "red")
+lines(q_F_10_detailed$x, q_G_10_detailed$p, type = "s", col = "blue")
+
+plot(q_F_10_detailed$x, (q_F_10_detailed$p - q_G_10_detailed$p)^2, type = "s", xlab = "x",
+     ylab = "Square Distance between F(x) and G(x)", 
+     ylim = c(0, 0.2),col="white")
+polygon(q_F_10_detailed$x, (q_F_10_detailed$p - q_G_10_detailed$p)^2, col = "lightblue")
+legend("topleft", "approx. CD", col = "lightblue", pch = 15)
+
+```
+
+In this example, six different approximations are applied to the distributions $F~N(9, 1.8)$ and $G~N(10, 1)$ in the figures above.
+
+```{r}
+# define distributions:
+mu_F <- 9
+sigma_F <- 1.8
+
+mu_G <- 10
+sigma_G <- 1
+```
+
+* Using direct numerical integration based on a fine grid of values for $x$:
+
+```{r}
+# simple numerical integration using grid:
+(cd_grid1 <- 0.1*sum((p_F - p_G)^2))
+```
+
+<!-- * Using sampling and the alternative expression \eqref{eq:formulation_expectations} of the CD from above: -->
+
+<!-- ```{r} -->
+<!-- n <- 100000 -->
+<!-- set.seed(123) -->
+<!-- x <- rnorm(n, mu_F, sigma_F) -->
+<!-- x_dash <- rnorm(n, mu_F, sigma_F) -->
+
+<!-- y <- rnorm(n, mu_G, sigma_G) -->
+<!-- y_dash <- rnorm(n, mu_G, sigma_G) -->
+
+<!-- (cd_sample <- (mean(abs(x - y)) - 0.5*(mean(abs(x - x_dash)) + mean(abs(y - y_dash))))) -->
+<!-- ``` -->
+
+<!-- * Using the first quantile-based approximation \eqref{eq:approx2} and various values of $K$: -->
+
+```{r}
+
+# values of K to check:
+values_K <- seq(5, 25,1)
+
+# # vector to store results:
+# cd_approx1 <- numeric(length(values_K))
+# 
+# # apply approximation for each_
+# for(i in seq_along(values_K)){
+#   p_temp <- (1:(values_K[i]))/(values_K[i] + 1) # quantile levels
+#   q_F_temp <- qnorm(p_temp, mu_F, sigma_F) # quantiles of F
+#   q_G_temp <- qnorm(p_temp, mu_G, sigma_G) # quantiles of G
+#   cd_approx1[i] <- approx_cd1(q_F = q_F_temp, q_G = q_G_temp) # approximation
+# }
+# 
+# cd_approx1
+```
+
+<!-- * Using the second quantile-based approximation \eqref{eq:approx2} and various values of $K$: -->
+
+<!-- ```{r} -->
+<!-- # vector to store results: -->
+<!-- cd_approx2 <- numeric(length(values_K)) -->
+
+<!-- # apply approximation for each_ -->
+<!-- for(i in seq_along(values_K)){ -->
+<!--   p_temp <- (1:(values_K[i] - 1))/values_K[i] # quantile levels -->
+<!--   q_F_temp <- qnorm(p_temp, mu_F, sigma_F) # quantiles of F -->
+<!--   q_G_temp <- qnorm(p_temp, mu_G, sigma_G) # quantiles of G -->
+<!--   cd_approx2[i] <- approx_cd2(q_F = q_F_temp, q_G = q_G_temp) # approximation -->
+<!-- } -->
+
+<!-- cd_approx2 -->
+<!-- ``` -->
+
+* Using the left-sided Riemann sum approximation and various values of $K$:
+
+```{r}
+# vector to store results:
+cd_approx3 <- numeric(length(values_K))
+cd_approx3t <- numeric(length(values_K))
+
+# apply approximation for each_
+for(i in seq_along(values_K)){
+  p_temp <- (1:(values_K[i] - 1))/values_K[i] # quantile levels
+  # p_temp <- (1:(5 - 1))/5 # quantile levels
+  q_F_temp <- qnorm(p_temp, mu_F, sigma_F) # quantiles of F
+  q_G_temp <- qnorm(p_temp, mu_G, sigma_G) # quantiles of G
+  # q_F_temp <- 1:4 # quantiles of F
+  # q_G_temp <- c(1:2,5:6) # quantiles of G
+  cd_approx3[i] <- approx_cd_uneq(q_F = q_F_temp, tau_F = p_temp,
+                                  q_G = q_G_temp, tau_G = p_temp,
+                                  approx_rule="left-sided") # approximation
+  cd_approx3t[i] <- approx_cd_uneq(q_F = q_F_temp, tau_F = p_temp,
+                                  q_G = q_G_temp, tau_G = p_temp,
+                                  approx_rule="trapezoid")
+  # cd_approx3 <- approx_cd_uneq(q_F = q_F_temp, tau_F = p_temp,
+  #                              q_G = q_G_temp, tau_G = p_temp,
+  #                              approx_rule="left-sided") # approximation
+}
+
+cd_approx3
+```
+
+<!-- * Using the trapezoidal Riemann sum approximation and various values of $K$: -->
+
+<!-- ```{r} -->
+<!-- # vector to store results: -->
+<!-- cd_approx4 <- numeric(length(values_K)) -->
+
+<!-- # apply approximation for each_ -->
+<!-- for(i in seq_along(values_K)){ -->
+<!--   p_temp <- (1:(values_K[i] - 1))/values_K[i] # quantile levels -->
+<!--   q_F_temp <- qnorm(p_temp, mu_F, sigma_F) # quantiles of F -->
+<!--   q_G_temp <- qnorm(p_temp, mu_G, sigma_G) # quantiles of G -->
+<!--   cd_approx4[i] <- approx_cd_uneq(q_F = q_F_temp, tau_F = p_temp, -->
+<!--                                   q_G = q_G_temp, tau_G = p_temp, -->
+<!--                                   approx_rule="trapezoid") # approximation -->
+<!-- } -->
+<!-- cd_approx4 -->
+<!-- ``` -->
+
+The below plot shows the results from the different computations.
+
+```{r}
+diff1 <- (cd_approx3-cd_grid1)
+diff1t <- (cd_approx3t-cd_grid1)
+
+# plot:
+# plot(values_K, cd_approx1, ylim = c(0, 0.5), xlab = "K", ylab = "CD",
+#      pch = 1, type = "b", log = "x", col = "darkorange")
+plot(values_K, cd_approx3, ylim = c(0.1, 0.4), xlab = "K", ylab = "CD",
+     pch = 1, type = "b", log = "x", col = "darkorange")
+# lines(values_K, cd_approx2, type = "b", col = "darkgreen")
+# lines(values_K, cd_approx3, type = "b", col = "blue")
+# lines(values_K, cd_approx4, type = "b", col = "brown")
+abline(h = cd_grid1, col = "black")
+# abline(h = cd_sample, col = "purple", lty = 2)
+legend("topright",
+       # c("grid-based", "sample-based", "quantile approx. 1", "quantile approx. 2",
+       #   "uneq quantile approx. 1", "uneq quantile approx. 2"),
+       c("Numerical integration", "Left-sided Riemann sum approx."),
+       # pch = c(NA, NA, 1, 1, 1, 1), lty = c(1, 2, NA, NA,NA, NA),
+       pch = c(NA, NA, 1), lty = c(1, 2, NA),
+       # col = c("black", "purple", "darkorange", "darkgreen","blue","brown"),
+       col = c("black", "darkorange"),
+       cex=0.8)
+```
+
+## Second example
+
+```{r ex2, fig.height=6, fig.width=8}
+grid_x <- seq(from = 3, to = 15, by = 0.1)
+
+mu_F <- 8
+sigma_F <- 2
+p_F <- pnorm(grid_x, mu_F, sigma_F)
+
+mu_G <- 10
+sigma_G <- 2
+p_G <- pnorm(grid_x, mu_G, sigma_G)
+
+y <- mu_G
+p_y <- as.numeric(grid_x > y)
+
+par(mfrow = c(2, 2), mai = c(0.5, 0.5, 0.2, 0.2))
+
+plot(grid_x, p_F, type = "l", xlab = "x", ylab = "CDF", col = "red")
+lines(grid_x, p_G, col = "blue")
+legend("topleft", c("F", "G"), col = c("red", "blue"), lty = 1)
+
+plot(grid_x, (p_F - p_G)^2, type = "l", xlab = "x", ylab = "(F(x) - G(x))^2", ylim = c(0, 0.2))
+polygon(grid_x, (p_F - p_G)^2, col = "lightblue")
+legend("topleft", "CD", col = "lightblue", pch = 15)
+
+detail_stepfun_cdf <- function(x, p, from, to, by = 0.1){
+  x_detailed <- seq(from = from, to = to, by = by)
+  p_detailed <- 0*x_detailed
+  for(i in seq_along(x)){
+    p_detailed[x_detailed >= x[i]] <- p[i]
+  }
+  return(list(x = x_detailed, p = p_detailed))
+}
+
+p_10 <- 1:11/12 # quantile levels
+# p_10 <- c(0.01,0.025,seq(0.05,0.95,0.05),0.975,0.99) # quantile levels
+
+q_F_10 <- qnorm(p_10, mu_F, sigma_F) # quantiles of F
+q_G_10 <- qnorm(p_10, mu_G, sigma_G) # quantiles of G
+
+q_F_10_detailed <- detail_stepfun_cdf(q_F_10, p_10, from = 3, to = 15)
+q_G_10_detailed <- detail_stepfun_cdf(q_G_10, p_10, from = 3, to = 15)
+p_10_detailed <- q_F_10_detailed$x
+
+plot(q_F_10_detailed$x, q_F_10_detailed$p, type = "s", xlab = "x", ylab = "CDF", col = "red")
+lines(q_F_10_detailed$x, q_G_10_detailed$p, type = "s", col = "blue")
+
+plot(q_F_10_detailed$x, (q_F_10_detailed$p - q_G_10_detailed$p)^2, type = "s", xlab = "x",
+     ylab = "Square Distance between F(x) and G(x)", 
+     ylim = c(0, 0.2),col="white")
+polygon(q_F_10_detailed$x, (q_F_10_detailed$p - q_G_10_detailed$p)^2, col = "lightblue")
+legend("topleft", "approx. CD", col = "lightblue", pch = 15)
+
+```
+
+<!-- In this example, six different approximations are applied to the distributions $F~N(9, 1.8)$ and $G~N(10, 1)$ in the figures above. -->
+
+```{r}
+# define distributions:
+mu_F <- 8
+sigma_F <- 2
+
+mu_G <- 10
+sigma_G <- 2
+```
+
+* Using direct numerical integration based on a fine grid of values for $x$:
+
+```{r}
+# simple numerical integration using grid:
+(cd_grid2 <- 0.1*sum((p_F - p_G)^2))
+```
+
+* Using the left-sided Riemann sum approximation and various values of $K$:
+
+```{r}
+# vector to store results:
+cd_approx31 <- numeric(length(values_K))
+cd_approx31t <- numeric(length(values_K))
+
+# apply approximation for each_
+for(i in seq_along(values_K)){
+  p_temp <- (1:(values_K[i] - 1))/values_K[i] # quantile levels
+  q_F_temp <- qnorm(p_temp, mu_F, sigma_F) # quantiles of F
+  q_G_temp <- qnorm(p_temp, mu_G, sigma_G) # quantiles of G
+  cd_approx31[i] <- approx_cd_uneq(q_F = q_F_temp, tau_F = p_temp,
+                                  q_G = q_G_temp, tau_G = p_temp,
+                                  approx_rule="left-sided") # approximation
+  cd_approx31t[i] <- approx_cd_uneq(q_F = q_F_temp, tau_F = p_temp,
+                                  q_G = q_G_temp, tau_G = p_temp,
+                                  approx_rule="trapezoid")
+}
+
+cd_approx31
+```
+
+
+The below plot shows the results from the different computations.
+
+```{r}
+# plot:
+diff2 <- (cd_approx31-cd_grid2)
+diff2t <- (cd_approx31t-cd_grid2)
+
+# plot(values_K, cd_approx1, ylim = c(0, 0.5), xlab = "K", ylab = "CD",
+#      pch = 1, type = "b", log = "x", col = "darkorange")
+plot(values_K, cd_approx31, ylim = c(0.4, 0.7), xlab = "K", ylab = "CD",
+     pch = 1, type = "b", log = "x", col = "darkorange")
+# lines(values_K, cd_approx2, type = "b", col = "darkgreen")
+# lines(values_K, cd_approx3, type = "b", col = "blue")
+# lines(values_K, cd_approx4, type = "b", col = "brown")
+abline(h = cd_grid2, col = "black")
+# abline(h = cd_sample, col = "purple", lty = 2)
+legend("topright",
+       # c("grid-based", "sample-based", "quantile approx. 1", "quantile approx. 2",
+       #   "uneq quantile approx. 1", "uneq quantile approx. 2"),
+       c("Numerical integration", "Left-sided Riemann sum approx."),
+       # pch = c(NA, NA, 1, 1, 1, 1), lty = c(1, 2, NA, NA,NA, NA),
+       pch = c(NA, NA, 1), lty = c(1, 2, NA),
+       # col = c("black", "purple", "darkorange", "darkgreen","blue","brown"),
+       col = c("black", "darkorange"),
+       cex=0.8)
+```
+
+## Third example
+
+```{r ex3, fig.height=6, fig.width=8}
+grid_x <- seq(from = 3, to = 13, by = 0.1)
+
+mu_F <- 8
+sigma_F <- 2
+p_F <- pnorm(grid_x, mu_F, sigma_F)
+
+mu_G <- 8
+sigma_G <- 1
+p_G <- pnorm(grid_x, mu_G, sigma_G)
+
+y <- mu_G
+p_y <- as.numeric(grid_x > y)
+
+par(mfrow = c(2, 2), mai = c(0.5, 0.5, 0.2, 0.2))
+
+plot(grid_x, p_F, type = "l", xlab = "x", ylab = "CDF", col = "red")
+lines(grid_x, p_G, col = "blue")
+legend("topleft", c("F", "G"), col = c("red", "blue"), lty = 1)
+
+plot(grid_x, (p_F - p_G)^2, type = "l", xlab = "x", ylab = "(F(x) - G(x))^2", ylim = c(0, 0.2))
+polygon(grid_x, (p_F - p_G)^2, col = "lightblue")
+legend("topleft", "CD", col = "lightblue", pch = 15)
+
+detail_stepfun_cdf <- function(x, p, from, to, by = 0.1){
+  x_detailed <- seq(from = from, to = to, by = by)
+  p_detailed <- 0*x_detailed
+  for(i in seq_along(x)){
+    p_detailed[x_detailed >= x[i]] <- p[i]
+  }
+  return(list(x = x_detailed, p = p_detailed))
+}
+
+p_10 <- 1:11/12 # quantile levels
+# p_10 <- c(0.01,0.025,seq(0.05,0.95,0.05),0.975,0.99) # quantile levels
+
+q_F_10 <- qnorm(p_10, mu_F, sigma_F) # quantiles of F
+q_G_10 <- qnorm(p_10, mu_G, sigma_G) # quantiles of G
+
+q_F_10_detailed <- detail_stepfun_cdf(q_F_10, p_10, from = 3, to = 13)
+q_G_10_detailed <- detail_stepfun_cdf(q_G_10, p_10, from = 3, to = 13)
+p_10_detailed <- q_F_10_detailed$x
+
+plot(q_F_10_detailed$x, q_F_10_detailed$p, type = "s", xlab = "x", ylab = "CDF", col = "red")
+lines(q_F_10_detailed$x, q_G_10_detailed$p, type = "s", col = "blue")
+
+plot(q_F_10_detailed$x, (q_F_10_detailed$p - q_G_10_detailed$p)^2, type = "s", xlab = "x",
+     ylab = "Square Distance between F(x) and G(x)", 
+     ylim = c(0, 0.1),col="white")
+polygon(q_F_10_detailed$x, (q_F_10_detailed$p - q_G_10_detailed$p)^2, col = "lightblue")
+legend("topleft", "approx. CD", col = "lightblue", pch = 15)
+
+```
+
+<!-- In this example, six different approximations are applied to the distributions $F~N(9, 1.8)$ and $G~N(10, 1)$ in the figures above. -->
+
+```{r}
+# define distributions:
+mu_F <- 8
+sigma_F <- 2
+
+mu_G <- 8
+sigma_G <- 1
+```
+
+* Using direct numerical integration based on a fine grid of values for $x$:
+
+```{r}
+# simple numerical integration using grid:
+(cd_grid3 <- 0.1*sum((p_F - p_G)^2))
+```
+
+* Using the left-sided Riemann sum approximation and various values of $K$:
+
+```{r}
+# vector to store results:
+cd_approx32 <- numeric(length(values_K))
+cd_approx32t <- numeric(length(values_K))
+
+# apply approximation for each_
+for(i in seq_along(values_K)){
+  p_temp <- (1:(values_K[i] - 1))/values_K[i] # quantile levels
+  q_F_temp <- qnorm(p_temp, mu_F, sigma_F) # quantiles of F
+  q_G_temp <- qnorm(p_temp, mu_G, sigma_G) # quantiles of G
+  cd_approx32[i] <- approx_cd_uneq(q_F = q_F_temp, tau_F = p_temp,
+                                  q_G = q_G_temp, tau_G = p_temp,
+                                  approx_rule="left-sided") # approximation
+  cd_approx32t[i] <- approx_cd_uneq(q_F = q_F_temp, tau_F = p_temp,
+                                  q_G = q_G_temp, tau_G = p_temp,
+                                  approx_rule="trapezoid")
+}
+
+cd_approx32
+```
+
+
+The below plot shows the results from the different computations.
+
+```{r}
+diff3 <- (cd_approx32-cd_grid3)
+diff3t <- (cd_approx32t-cd_grid3)
+
+# plot:
+# plot(values_K, cd_approx1, ylim = c(0, 0.5), xlab = "K", ylab = "CD",
+#      pch = 1, type = "b", log = "x", col = "darkorange")
+plot(values_K, cd_approx32, ylim = c(0.05, 0.15), xlab = "K", ylab = "CD",
+     pch = 1, type = "b", log = "x", col = "darkorange")
+# lines(values_K, cd_approx2, type = "b", col = "darkgreen")
+# lines(values_K, cd_approx3, type = "b", col = "blue")
+# lines(values_K, cd_approx4, type = "b", col = "brown")
+abline(h = cd_grid3, col = "black")
+# abline(h = cd_sample, col = "purple", lty = 2)
+legend("topright",
+       # c("grid-based", "sample-based", "quantile approx. 1", "quantile approx. 2",
+       #   "uneq quantile approx. 1", "uneq quantile approx. 2"),
+       c("Numerical integration", "Left-sided Riemann sum approx."),
+       # pch = c(NA, NA, 1, 1, 1, 1), lty = c(1, 2, NA, NA,NA, NA),
+       pch = c(NA, NA, 1), lty = c(1, 2, NA),
+       # col = c("black", "purple", "darkorange", "darkgreen","blue","brown"),
+       col = c("black", "darkorange"),
+       cex=0.8)
+```
+# make a plot of all differences between real vs approx for all cases
+
+```{r diff}
+# # plot the diff
+# diff_dat <- data.frame(rbind(cbind(diff1,rep("Unequal Mean and Variance",length(values_K))),
+#                              cbind(diff2,rep("Equal Mean",length(values_K))),
+#                              cbind(diff3,rep("Equal Variance",length(values_K)))))
+# names(diff_dat) <- c("diff","Scenario")
+diff_datf1 <- data.frame(rbind(cbind(cd_grid1,rep("Unequal Mean and Variance",length(values_K)),
+                                     rep("CD",length(values_K))),
+                             cbind(cd_grid2,rep("Equal Mean",length(values_K)),
+                                     rep("CD",length(values_K))),
+                             cbind(cd_grid3,rep("Equal Variance",length(values_K)),
+                                     rep("CD",length(values_K))))
+                         )
+diff_datf2 <- data.frame(rbind(cbind(cd_approx3,rep("Unequal Mean and Variance",length(values_K)),
+                                     rep("Approx. CD",length(values_K))),
+                             cbind(cd_approx31,rep("Equal Mean",length(values_K)),
+                                     rep("Approx. CD",length(values_K))),
+                             cbind(cd_approx32,rep("Equal Variance",length(values_K)),
+                                     rep("Approx. CD",length(values_K)))))
+names(diff_datf1) <- c("diff","Scenario","type")
+names(diff_datf2) <- c("diff","Scenario","type")
+diff_dat <- rbind(diff_datf1,diff_datf2)
+diff_dat$k_val <- values_K
+ggplot(diff_dat,aes(x=k_val,y=as.numeric(diff),color=Scenario)) +
+  geom_line(aes(linetype=type))+
+  ylab("Approximate CD vs CD") +
+  xlab("Number of Quantiles") +
+  theme_bw()+
+  theme(
+    # axis.text.x = element_text(angle=-45, hjust=-0.2),
+    # legend.title = element_text(size=5),
+    legend.key.size = unit(0.3, 'cm'),
+    # legend.text = element_text(size=4),
+    legend.position = "bottom") 
+```
+
+```{r diff2}
+# plot the diff
+diff_dat01 <- data.frame(rbind(cbind('Left Riemann Sum',cd_approx3,rep("Unequal Mean and Variance",length(values_K))),
+                             cbind('Left Riemann Sum',cd_approx31,rep("Equal Mean",length(values_K))),
+                             cbind('Left Riemann Sum',cd_approx32,rep("Equal Variance",length(values_K)))))
+diff_dat02 <- data.frame(rbind(cbind('Trapezoidal Riemann Sum',
+                                     cd_approx3t,rep("Unequal Mean and Variance",length(values_K))),
+                             cbind('Trapezoidal Riemann Sum',cd_approx31t,rep("Equal Mean",length(values_K))),
+                             cbind('Trapezoidal Riemann Sum',cd_approx32t,rep("Equal Variance",length(values_K)))))
+names(diff_dat01) <- c('type',"diff","Scenario")
+names(diff_dat02) <- c('type',"diff","Scenario")
+diff_datf1 <- diff_datf1 %>%
+  select("type","diff","Scenario") %>%
+  mutate(type="CD")
+diff_dat2 <- rbind(diff_dat01,diff_dat02,diff_datf1)
+diff_dat2$k_val <- values_K
+ggplot(diff_dat2,aes(x=k_val,y=as.numeric(diff),group=interaction(Scenario,type))) +
+  geom_line(aes(color=Scenario,linetype=type))+
+  ylim(0,0.75)+
+  ylab("Approximate CD vs CD") +
+  xlab("Number of Quantiles") +
+  # guides(fill=guide_legend(nrow=2,byrow=TRUE)) +
+  theme_bw()+
+  theme(
+    # axis.text.x = element_text(angle=-45, hjust=-0.2),
+    legend.title = element_blank(),
+    legend.key.size = unit(0.3, 'cm'),
+    # legend.text = element_text(size=4),
+    legend.position = "bottom",
+    legend.box="vertical") 
+```
+
+```{r}
+# plot the diff
+check<- data.frame(rbind(cbind(diff1,rep("Unequal Mean and Variance",length(values_K))),
+                             cbind(diff2,rep("Equal Mean",length(values_K))),
+                             cbind(diff3,rep("Equal Variance",length(values_K)))))
+names(check) <- c("diff","Scenario")
+check$abs_diff <- abs(as.numeric(check$diff))
+check$k <- rep(1:21,3)
+check$truth <- c(cd_grid1,cd_grid2,cd_grid3)
+check$percentd <- (check$abs_diff/check$truth)*100
+# 25 with 21 values
+check %>%
+  group_by(Scenario) %>%
+  summarize(mean(percentd))
+```
+
+
+```{r}
+# plot the diff
+check2<- data.frame(rbind(cbind(diff1t,rep("Unequal Mean and Variance",length(values_K))),
+                             cbind(diff2t,rep("Equal Mean",length(values_K))),
+                             cbind(diff3t,rep("Equal Variance",length(values_K)))))
+names(check2) <- c("diff","Scenario")
+check2$abs_diff <- abs(as.numeric(check2$diff))
+check2$k <- rep(1:21,3)
+check2$truth <- c(cd_grid1,cd_grid2,cd_grid3)
+check2$percentd <- (check2$abs_diff/check2$truth)*100
+# 25 with 21 values
+check2 %>%
+  group_by(Scenario) %>%
+  summarize(mean(percentd))
+```
+
+
+```{r}
+values_K <- 3
+cdx <- numeric(length(values_K))
+cdx2 <- numeric(length(values_K))
+p_temp <- c(0.025,0.5,0.975)
+q_G_temp <-  c(15,100,850)
+q_F_temp <- c(10,150,900)
+# apply approximation for each_
+for(i in seq_along(values_K)){
+  cdx[i] <- approx_cd_uneq(q_F = q_F_temp, tau_F = p_temp,
+                                  q_G = q_G_temp, tau_G = p_temp,
+                                  approx_rule="left-sided") # approximation
+  # cdx2[i] <- approx_cd_uneq(q_F = q_F_temp, tau_F = p_temp,
+  #                                 q_G = q_G_temp, tau_G = p_temp,
+  #                                 approx_rule="trapezoid") # approximation
+}
+
+cdx
+```
+
+<!-- In the case that $G$ is a point mass at $y=10$, approximation \eqref{eq:approx1} indeed coincides with \eqref{eq:linear_quantile_scores}. -->
+
+<!-- ```{r} -->
+
+<!-- # define G_star -->
+<!-- y <- 10 -->
+<!-- q_G_star <- rep(y, length(p_10)) -->
+
+<!-- print(paste0("Quantile approx. 1: ", approx_cd1(q_F_10, q_G_star)))# approximation 1 -->
+<!-- print(paste0("Quantile approx. 2: ",approx_cd2(q_F_10, q_G_star))) # approximation 2 -->
+<!-- print(paste0("Uneq quantile approx. 1: ",approx_cd_uneq(q_F = q_F_10, tau_F = p_10, -->
+<!--                q_G = q_G_star, tau_G = p_10, -->
+<!--                                   approx_rule="left-sided")))# approximation 3 -->
+<!-- print(paste0("Uneq quantile approx. 2: ",approx_cd_uneq(q_F = q_F_10, tau_F = p_10, -->
+<!--                q_G = q_G_star, tau_G = p_10, -->
+<!--                approx_rule="trapezoid"))) # approximation 4 -->
+<!-- print(paste0("Quantile score WIS: ",mean(2*((y <= q_F_10) - p_10)*(q_F_10 - y)))) # WIS defined via quantile scores -->
+<!-- ``` -->
+
+<!-- The approximation \eqref{eq:approx1} is closer to the grid-based direct evaluation of the integral. Since the unequally-spaced approximations were not formulated from (equally-spaced) WIS, it may be expected. -->
+
+<!-- ```{r} -->
+<!-- # grid-based approximation: -->
+<!-- p_G_star <- as.numeric(grid_x >= y) -->
+<!-- print(paste0("Grid-based approx.: ", 0.1*sum((p_F - p_G_star)^2))) -->
+<!-- ``` -->
+
+<!-- ## Unequally-spaceed intervals -->
+
+<!-- We apply the same six approximations as in the previous example to the two distributions $F\sim N(8,2)$ and $G \sim N(11,1)$ whose quantiles correspond to unequally-spaced probability levels. -->
+
+<!-- ### 7 quantiles with unequally-spaced intervals -->
+
+<!-- The probability levels corresponding to the given set of quantiles in this example is $0.025,0.1,0.25,0.5,0.75,0.9,0.975$, which is the same probability levels provided by the COVID-hub case forecasts. -->
+
+<!-- ```{r, echo=FALSE, fig.height=5, fig.width=8} -->
+<!-- grid_x <- seq(from = 3, to = 16, by = 0.1) -->
+
+<!-- mu_F <- 8 -->
+<!-- sigma_F <- 2 -->
+<!-- p_F <- pnorm(grid_x, mu_F, sigma_F) -->
+
+<!-- mu_G <- 11 -->
+<!-- sigma_G <- 1 -->
+<!-- p_G <- pnorm(grid_x, mu_G, sigma_G) -->
+
+<!-- y <- mu_G -->
+<!-- p_y <- as.numeric(grid_x > y) -->
+
+<!-- par(mfrow = c(2, 2)) -->
+
+<!-- plot(grid_x, p_F, type = "l", xlab = "x", ylab = "CDF", col = "red") -->
+<!-- lines(grid_x, p_G, col = "blue") -->
+<!-- legend("topleft", c("F", "G"), col = c("red", "blue"), lty = 1) -->
+
+<!-- plot(grid_x, (p_F - p_G)^2, type = "l", xlab = "x", ylab = "(F(x) - G(x))^2", ylim = c(0, 0.7)) -->
+<!-- polygon(grid_x, (p_F - p_G)^2, col = "lightblue") -->
+<!-- legend("topleft", "CD", col = "lightblue", pch = 15) -->
+
+<!-- detail_stepfun_cdf <- function(x, p, from, to, by = 0.1){ -->
+<!--   x_detailed <- seq(from = from, to = to, by = by) -->
+<!--   p_detailed <- 0*x_detailed -->
+<!--   for(i in seq_along(x)){ -->
+<!--     p_detailed[x_detailed >= x[i]] <- p[i] -->
+<!--   } -->
+<!--   return(list(x = x_detailed, p = p_detailed)) -->
+<!-- } -->
+
+<!-- p_10 <- c(0.025,0.1,0.25,0.5,0.75,0.9,0.975) -->
+<!-- q_F_10 <- qnorm(p_10, mu_F, sigma_F) # quantiles of F -->
+<!-- q_G_10 <- qnorm(p_10, mu_G, sigma_G) # quantiles of G -->
+
+<!-- q_F_10_detailed <- detail_stepfun_cdf(q_F_10, p_10, from = 3, to = 16) -->
+<!-- q_G_10_detailed <- detail_stepfun_cdf(q_G_10, p_10, from = 3, to = 16) -->
+<!-- p_10_detailed <- q_F_10_detailed$x -->
+
+<!-- plot(q_F_10_detailed$x, q_F_10_detailed$p, type = "s", xlab = "x", ylab = "CDF", col = "red") -->
+<!-- lines(q_F_10_detailed$x, q_G_10_detailed$p, type = "s", col = "blue") -->
+
+<!-- plot(q_F_10_detailed$x, (q_F_10_detailed$p - q_G_10_detailed$p)^2, type = "s", xlab = "x", -->
+<!--      ylab = "(F*(x) - G*(x))^2", ylim = c(0, 0.7)) -->
+<!-- polygon(q_F_10_detailed$x, (q_F_10_detailed$p - q_G_10_detailed$p)^2, col = "lightblue") -->
+<!-- legend("topleft", "approx. CD", col = "lightblue", pch = 15) -->
+
+<!-- ``` -->
+
+
+<!-- * Using direct numerical integration based on a fine grid of values for $x$. -->
+
+<!-- ```{r} -->
+<!-- # simple numerical integration using grid: -->
+<!-- (cd_grid <- 0.1*sum((p_F - p_G)^2)) -->
+<!-- ``` -->
+
+<!-- * Using sampling and the alternative expression \eqref{eq:formulation_expectations} of the CD from above: -->
+<!-- ```{r} -->
+<!-- n <- 100000 -->
+<!-- set.seed(123) -->
+<!-- x <- rnorm(n, mu_F, sigma_F) -->
+<!-- x_dash <- rnorm(n, mu_F, sigma_F) -->
+
+<!-- y <- rnorm(n, mu_G, sigma_G) -->
+<!-- y_dash <- rnorm(n, mu_G, sigma_G) -->
+
+<!-- (cd_sample <- (mean(abs(x - y)) - 0.5*(mean(abs(x - x_dash)) + mean(abs(y - y_dash))))) -->
+<!-- ``` -->
+
+<!-- * Using the first quantile-based approximation: -->
+
+<!-- ```{r} -->
+<!-- k <- length(p_10) -->
+<!-- # apply approximation for each_ -->
+<!-- p_temp <- (1:k)/(k + 1) # quantile levels -->
+<!-- q_F_temp <- qnorm(p_temp, mu_F, sigma_F) # quantiles of F -->
+<!-- q_G_temp <- qnorm(p_temp, mu_G, sigma_G) # quantiles of G -->
+<!-- cd_approx1 <- approx_cd1(q_F = q_F_temp, q_G = q_G_temp) # approximation -->
+
+
+<!-- cd_approx1 -->
+<!-- ``` -->
+
+<!-- * Using the second quantile-based approximation: -->
+
+<!-- ```{r} -->
+<!-- cd_approx2 <- approx_cd2(q_F = q_F_temp, q_G = q_G_temp) # approximation -->
+
+<!-- cd_approx2 -->
+<!-- ``` -->
+
+<!-- * Using the left-sided Riemann sum-based approximation: -->
+
+<!-- ```{r} -->
+<!-- # apply approximation for each_ -->
+<!-- cd_approx3 <- approx_cd_uneq(q_F = q_F_temp, tau_F = p_temp, -->
+<!--                              q_G = q_G_temp, tau_G = p_temp, -->
+<!--                              approx_rule="left-sided") # approximation -->
+<!-- cd_approx3 -->
+<!-- ``` -->
+
+<!-- * Using the trapezoidal Riemann sum-based approximation: -->
+
+<!-- ```{r} -->
+<!-- # apply approximation for each -->
+<!-- cd_approx4 <- approx_cd_uneq(q_F = q_F_temp, tau_F = p_temp, -->
+<!--                              q_G = q_G_temp, tau_G = p_temp, -->
+<!--                              approx_rule="trapezoid") # approximation -->
+<!-- cd_approx4 -->
+<!-- ``` -->
+
+<!-- Out of all four quantile-based approximation, the trapezoidal Riemann sum-based approximation is closest to the grid-based integral evaluation. -->
+
+<!-- ### 23 quantiles with 2 unequally-spaced probability levels at the tails -->
+
+<!-- Using the same $F$ and $G$, the probability levels corresponding to the given set of quantiles in this example is the same probability levels provided by the COVID-hub death forecasts. They are almost equally-spaced, except at the tails. -->
+
+<!-- ```{r, echo=FALSE, fig.height=5, fig.width=8} -->
+<!-- grid_x <- seq(from = 3, to = 16, by = 0.1) -->
+
+<!-- mu_F <- 8 -->
+<!-- sigma_F <- 2 -->
+<!-- p_F <- pnorm(grid_x, mu_F, sigma_F) -->
+
+<!-- mu_G <- 11 -->
+<!-- sigma_G <- 1 -->
+<!-- p_G <- pnorm(grid_x, mu_G, sigma_G) -->
+
+<!-- y <- mu_G -->
+<!-- p_y <- as.numeric(grid_x > y) -->
+
+<!-- par(mfrow = c(2, 2)) -->
+
+<!-- plot(grid_x, p_F, type = "l", xlab = "x", ylab = "CDF", col = "red") -->
+<!-- lines(grid_x, p_G, col = "blue") -->
+<!-- legend("topleft", c("F", "G"), col = c("red", "blue"), lty = 1) -->
+
+<!-- plot(grid_x, (p_F - p_G)^2, type = "l", xlab = "x", ylab = "(F(x) - G(x))^2", ylim = c(0, 0.7)) -->
+<!-- polygon(grid_x, (p_F - p_G)^2, col = "lightblue") -->
+<!-- legend("topleft", "CD", col = "lightblue", pch = 15) -->
+
+<!-- detail_stepfun_cdf <- function(x, p, from, to, by = 0.1){ -->
+<!--   x_detailed <- seq(from = from, to = to, by = by) -->
+<!--   p_detailed <- 0*x_detailed -->
+<!--   for(i in seq_along(x)){ -->
+<!--     p_detailed[x_detailed >= x[i]] <- p[i] -->
+<!--   } -->
+<!--   return(list(x = x_detailed, p = p_detailed)) -->
+<!-- } -->
+
+<!-- p_10 <- c(0.01,0.025,seq(0.05,0.95,0.05),0.975,0.99) # quantile levels -->
+<!-- # for case -->
+<!-- # p_10 <- c(0.025,0.1,0.25,0.5,0.75,0.9,0.975) -->
+<!-- q_F_10 <- qnorm(p_10, mu_F, sigma_F) # quantiles of F -->
+<!-- q_G_10 <- qnorm(p_10, mu_G, sigma_G) # quantiles of G -->
+
+<!-- q_F_10_detailed <- detail_stepfun_cdf(q_F_10, p_10, from = 3, to = 16) -->
+<!-- q_G_10_detailed <- detail_stepfun_cdf(q_G_10, p_10, from = 3, to = 16) -->
+<!-- p_10_detailed <- q_F_10_detailed$x -->
+
+<!-- plot(q_F_10_detailed$x, q_F_10_detailed$p, type = "s", xlab = "x", ylab = "CDF", col = "red") -->
+<!-- lines(q_F_10_detailed$x, q_G_10_detailed$p, type = "s", col = "blue") -->
+
+<!-- plot(q_F_10_detailed$x, (q_F_10_detailed$p - q_G_10_detailed$p)^2, type = "s", xlab = "x", -->
+<!--      ylab = "(F*(x) - G*(x))^2", ylim = c(0, 0.7)) -->
+<!-- polygon(q_F_10_detailed$x, (q_F_10_detailed$p - q_G_10_detailed$p)^2, col = "lightblue") -->
+<!-- legend("topleft", "approx. CD", col = "lightblue", pch = 15) -->
+
+<!-- ``` -->
+
+<!-- * Using the first quantile-based approximation: -->
+
+<!-- ```{r} -->
+<!-- k <- length(p_10) -->
+<!-- # apply approximation for each_ -->
+<!-- p_temp <- (1:k)/(k + 1) # quantile levels -->
+<!-- q_F_temp <- qnorm(p_temp, mu_F, sigma_F) # quantiles of F -->
+<!-- q_G_temp <- qnorm(p_temp, mu_G, sigma_G) # quantiles of G -->
+<!-- cd_approx1 <- approx_cd1(q_F = q_F_temp, q_G = q_G_temp) # approximation -->
+
+
+<!-- cd_approx1 -->
+<!-- ``` -->
+
+<!-- * Using the second quantile-based approximation: -->
+
+<!-- ```{r} -->
+<!-- cd_approx2 <- approx_cd2(q_F = q_F_temp, q_G = q_G_temp) # approximation -->
+
+<!-- cd_approx2 -->
+<!-- ``` -->
+
+<!-- * Using the left-sided Riemann sum-based approximation: -->
+
+<!-- ```{r} -->
+<!-- # apply approximation for each_ -->
+<!-- cd_approx3 <- approx_cd_uneq(q_F = q_F_temp, tau_F = p_temp, -->
+<!--                              q_G = q_G_temp, tau_G = p_temp, -->
+<!--                              approx_rule="left-sided") # approximation -->
+<!-- cd_approx3 -->
+<!-- ``` -->
+
+<!-- * Using the trapezoidal Riemann sum-based approximation: -->
+
+<!-- ```{r} -->
+<!-- # apply approximation for each -->
+<!-- cd_approx4 <- approx_cd_uneq(q_F = q_F_temp, tau_F = p_temp, -->
+<!--                              q_G = q_G_temp, tau_G = p_temp, -->
+<!--                              approx_rule="trapezoid") # approximation -->
+<!-- cd_approx4 -->
+<!-- ``` -->
+
+<!-- Again, the trapezoidal Riemann sum-based approximation is closest to the grid-based integral evaluation of 1.493653. -->
+
+<!-- ### Examples of Disagreement Between Equally- and Unequally-spaced Interval Methods -->
+
+<!-- ### Heavy tails -->
+
+<!-- Suppose we have three cumulative distributions, $F\sim N(1,1)$, $G\sim T_1$, represented by 7 unequally-spaced quantiles. The probability levels corresponding to the given set of quantiles in this example is $0.025,0.1,0.25,0.5,0.75,0.9,0.975$. -->
+
+<!-- ```{r, echo=FALSE, fig.height=5, fig.width=8} -->
+<!-- grid_x <- seq(from = -8, to = 10, by = 0.1) -->
+
+<!-- mu_F <- 0 -->
+<!-- sigma_F <- 1 -->
+<!-- p_F <- pnorm(grid_x, mu_F, sigma_F) -->
+
+<!-- # mu_G <- 1 -->
+<!-- # sigma_G <- 1 -->
+<!-- # p_G <- pnorm(grid_x, mu_G, sigma_G) -->
+
+<!-- # try laplace instead of t -->
+<!-- deg <- 1 -->
+<!-- p_G <- pt(grid_x, deg, lower.tail = TRUE, log.p = FALSE) -->
+
+<!-- par(mfrow = c(2, 2)) -->
+
+<!-- plot(grid_x, p_F, type = "l", xlab = "x", ylab = "CDF", col = "red") -->
+<!-- lines(grid_x, p_G, col = "blue") -->
+<!-- # lines(grid_x, p_H, col = "green") -->
+<!-- legend("topleft", c("F", "G"), col = c("red", "blue"), lty = 1) -->
+
+<!-- plot(grid_x, (p_F - p_G)^2, type = "l", xlab = "x", ylab = "Squared Distance", ylim = c(0, 0.5)) -->
+<!-- polygon(grid_x, (p_F - p_G)^2, col = "lightblue",) -->
+<!-- # lines(grid_x, (p_F - p_H)^2, col = "lightgreen") -->
+<!-- # polygon(grid_x, (p_F - p_H)^2, col = "lightgreen") -->
+<!-- # lines(grid_x, (p_H - p_G)^2, col = rgb(1, 1, 0,0.5)) -->
+<!-- # polygon(grid_x, (p_H - p_G)^2, col = rgb(1, 1, 0,0.5)) -->
+<!-- legend("topleft", c("F vs G"), -->
+<!--        col = c("lightblue"), pch = 15) -->
+
+<!-- # p_10 <- c(0.025,0.1,0.25,0.5,0.75,0.9,0.975) -->
+<!-- q_F_10 <- qnorm(p_10, mu_F, sigma_F) # quantiles of F -->
+<!-- # q_G_10 <- qnorm(p_10, mu_G, sigma_G) # quantiles of G -->
+<!-- q_G_10 <- qt(p_10, deg, lower.tail = TRUE, log.p = FALSE)# quantiles of H -->
+
+<!-- q_F_10_detailed <- detail_stepfun_cdf(q_F_10, p_10, from = -8, to = 10) -->
+<!-- q_G_10_detailed <- detail_stepfun_cdf(q_G_10, p_10, from = -8, to = 10) -->
+<!-- # q_H_10_detailed <- detail_stepfun_cdf(q_H_10, p_10, from = -8, to = 10) -->
+
+<!-- p_10_detailed <- q_F_10_detailed$x -->
+
+<!-- plot(q_F_10_detailed$x, q_F_10_detailed$p, type = "s", xlab = "x", ylab = "CDF", col = "red") -->
+<!-- lines(q_F_10_detailed$x, q_G_10_detailed$p, type = "s", col = "blue") -->
+<!-- # lines(q_F_10_detailed$x, q_H_10_detailed$p, type = "s", col = "green") -->
+
+<!-- plot(q_F_10_detailed$x, (q_F_10_detailed$p - q_G_10_detailed$p)^2, type = "s", xlab = "x", -->
+<!--      ylab = "Squared Distance", ylim = c(0, 0.5)) -->
+<!-- # polygon(q_F_10_detailed$x, (q_F_10_detailed$p - q_G_10_detailed$p)^2, col = "lightblue",fillOddEven = "non-zero") -->
+<!-- # lines(q_F_10_detailed$x, (q_F_10_detailed$p - q_H_10_detailed$p)^2, col = "lightgreen") -->
+<!-- # polygon(q_F_10_detailed$x, (q_F_10_detailed$p - q_H_10_detailed$p)^2, col = "lightgreen") -->
+<!-- # lines(q_F_10_detailed$x, (q_H_10_detailed$p - q_G_10_detailed$p)^2, col = rgb(1, 1, 0,0.5)) -->
+<!-- # polygon(q_F_10_detailed$x, (q_H_10_detailed$p - q_G_10_detailed$p)^2, col = rgb(1, 1, 0,0.5)) -->
+<!-- legend("topleft", c("F vs G"), -->
+<!--        col = c("lightblue"), pch = 15) -->
+<!-- ``` -->
+
+
+<!-- * Using direct numerical integration based on a fine grid of values for $x$. -->
+
+<!-- ```{r} -->
+<!-- # simple numerical integration using grid: -->
+<!-- print(paste0("CD of F vs G: ",(cd_grid <- 0.1*sum((p_F - p_G)^2)))) -->
+<!-- # print(paste0("CD of F vs H: ",(cd_grid <- 0.1*sum((p_F - p_H)^2)))) -->
+<!-- # print(paste0("CD of H vs G: ",(cd_grid <- 0.1*sum((p_H - p_G)^2)))) -->
+<!-- ``` -->
+
+<!-- * Using sampling and the alternative expression \eqref{eq:formulation_expectations} of the CD from above: -->
+
+<!-- ```{r} -->
+<!-- n <- 100000 -->
+<!-- set.seed(123) -->
+<!-- x <- rnorm(n, mu_F, sigma_F) -->
+<!-- x_dash <- rnorm(n, mu_F, sigma_F) -->
+
+
+<!-- y <- rt(grid_x, deg) -->
+<!-- y_dash <- rt(grid_x, deg) -->
+
+<!-- (cd_sample <- (mean(abs(x - y)) - 0.5*(mean(abs(x - x_dash)) + mean(abs(y - y_dash))))) -->
+<!-- ``` -->
+<!-- * Using the first quantile-based approximation: -->
+
+<!-- ```{r} -->
+<!-- k <- length(p_10) -->
+<!-- # apply approximation for each_ -->
+<!-- p_temp <- (1:k)/(k + 1) # quantile levels -->
+<!-- q_F_temp <- qnorm(p_temp, mu_F, sigma_F) # quantiles of F -->
+<!-- # q_G_temp <- qnorm(p_temp, mu_G, sigma_G) # quantiles of G -->
+<!-- q_G_temp <- qt(p_temp, deg, lower.tail = TRUE, log.p = FALSE)# quantiles of H -->
+<!-- cd_approx11 <- approx_cd1(q_F = q_F_temp, q_G = q_G_temp) # approximation -->
+<!-- # cd_approx12 <- approx_cd1(q_F = q_F_temp, q_G = q_H_temp) # approximation -->
+<!-- # cd_approx13 <- approx_cd1(q_F = q_H_temp, q_G = q_G_temp) # approximation -->
+
+<!-- print(paste0("Approx. CD of F vs G: ",cd_approx11)) -->
+<!-- # print(paste0("Approx. CD of F vs H: ",cd_approx12)) -->
+<!-- # print(paste0(" Approx. CD of H vs G: ",cd_approx13)) -->
+<!-- ``` -->
+
+<!-- * Using the second quantile-based approximation: -->
+
+<!-- ```{r} -->
+<!-- cd_approx21 <- approx_cd2(q_F = q_F_temp, q_G = q_G_temp) # approximation -->
+<!-- # cd_approx22 <- approx_cd2(q_F = q_F_temp, q_G = q_H_temp) # approximation -->
+<!-- # cd_approx23 <- approx_cd2(q_F = q_H_temp, q_G = q_G_temp) # approximation -->
+
+<!-- print(paste0("Approx. CD of F vs G: ",cd_approx21)) -->
+<!-- # print(paste0("Approx. CD of F vs H: ",cd_approx22)) -->
+<!-- # print(paste0(" Approx. CD of H vs G: ",cd_approx23)) -->
+<!-- ``` -->
+
+<!-- * Using the left-sided Riemann sum-based approximation: -->
+
+<!-- ```{r} -->
+<!-- cd_approx31 <- numeric(length(values_K)) -->
+
+<!-- # apply approximation for each -->
+<!-- cd_approx311 <- approx_cd_uneq(q_F = q_F_temp, tau_F = p_temp, -->
+<!--                              q_G = q_G_temp, tau_G = p_temp, -->
+<!--                              approx_rule="left-sided") # approximation -->
+<!-- # cd_approx32 <- approx_cd_uneq(q_F = q_F_temp,tau_F = p_temp, -->
+<!-- #                           q_G = q_H_temp, tau_G = p_temp, -->
+<!-- #                           approx_rule="left-sided") # approximation -->
+<!-- # cd_approx33 <- approx_cd_uneq(q_F = q_H_temp,  tau_F = p_temp, -->
+<!-- #                           q_G = q_G_temp, tau_G = p_temp, -->
+<!-- #                           approx_rule="left-sided") # approximation -->
+
+<!-- print(paste0("Approx. CD of F vs G: ",cd_approx311)) -->
+<!-- # print(paste0("Approx. CD of F vs H: ",cd_approx32)) -->
+<!-- # print(paste0(" Approx. CD of H vs G: ",cd_approx33)) -->
+<!-- # apply approximation for each_ -->
+<!-- for(i in seq_along(values_K)){ -->
+<!--   p_temp <- (1:(values_K[i] - 1))/values_K[i] # quantile levels -->
+<!--   q_F_temp <- qnorm(p_temp, mu_F, sigma_F) # quantiles of F -->
+<!--   q_G_temp <- qnorm(p_temp, mu_G, sigma_G) # quantiles of G -->
+<!--   cd_approx31[i] <- approx_cd_uneq(q_F = q_F_temp, tau_F = p_temp, -->
+<!--                                   q_G = q_G_temp, tau_G = p_temp, -->
+<!--                                   approx_rule="left-sided") # approximation -->
+<!-- } -->
+
+<!-- cd_approx31 -->
+<!-- ``` -->
+
+<!-- * Using the trapezoidal Riemann sum-based approximation: -->
+
+<!-- ```{r} -->
+<!-- # apply approximation for each -->
+<!-- cd_approx41 <- approx_cd_uneq(q_F = q_F_temp, tau_F = p_temp, -->
+<!--                              q_G = q_G_temp, tau_G = p_temp, -->
+<!--                              approx_rule="trapezoid") # approximation -->
+<!-- cd_approx42 <- approx_cd_uneq(q_F = q_F_temp,tau_F = p_temp, -->
+<!--                           q_G = q_H_temp, tau_G = p_temp, -->
+<!--                           approx_rule="trapezoid") # approximation -->
+<!-- cd_approx43 <- approx_cd_uneq(q_F = q_H_temp,  tau_F = p_temp, -->
+<!--                           q_G = q_G_temp, tau_G = p_temp, -->
+<!--                           approx_rule="trapezoid") # approximation -->
+
+<!-- print(paste0("Approx. CD of F vs G: ",cd_approx41)) -->
+<!-- print(paste0("Approx. CD of F vs H: ",cd_approx42)) -->
+<!-- print(paste0(" Approx. CD of H vs G: ",cd_approx43)) -->
+<!-- ``` -->
+
+# ```{r}
+# # plot:
+# # plot(values_K, cd_approx1, ylim = c(0, 0.5), xlab = "K", ylab = "CD",
+# #      pch = 1, type = "b", log = "x", col = "darkorange")
+# plot(values_K, cd_approx31, ylim = c(0.1, 0.4), xlab = "K", ylab = "CD",
+#      pch = 1, type = "b", log = "x", col = "darkorange")
+# # lines(values_K, cd_approx2, type = "b", col = "darkgreen")
+# # lines(values_K, cd_approx3, type = "b", col = "blue")
+# # lines(values_K, cd_approx4, type = "b", col = "brown")
+# abline(h = cd_grid, col = "black")
+# abline(h = cd_sample, col = "purple", lty = 2)
+# legend("topright",
+#        # c("grid-based", "sample-based", "quantile approx. 1", "quantile approx. 2",
+#        #   "uneq quantile approx. 1", "uneq quantile approx. 2"),
+#        c("grid-based", "sample-based", "left-sided Riemann sum approx."),
+#        # pch = c(NA, NA, 1, 1, 1, 1), lty = c(1, 2, NA, NA,NA, NA),
+#        pch = c(NA, NA, 1), lty = c(1, 2, NA),
+#        # col = c("black", "purple", "darkorange", "darkgreen","blue","brown"),
+#        col = c("black", "purple", "darkorange"),
+#        cex=0.8)
+# ```
+
+<!-- ### Long tails -->
+
+<!-- Suppose we have three cumulative distributions, $F\sim N(0,1)$, $G\sim N(1,1)$ and $H\sim \text{Laplace}(0,1)$, represented by 7 unequally-spaced quantiles. The probability levels corresponding to the given set of quantiles in this example is $0.025,0.1,0.25,0.5,0.75,0.9,0.975$. -->
+
+<!-- ```{r, echo=FALSE, fig.height=5, fig.width=8} -->
+<!-- grid_x <- seq(from = -8, to = 8, by = 0.1) -->
+
+<!-- mu_F <- 0 -->
+<!-- sigma_F <- 1 -->
+<!-- p_F <- pnorm(grid_x, mu_F, sigma_F) -->
+
+<!-- # mu_G <- 1 -->
+<!-- # sigma_G <- 1 -->
+<!-- # p_G <- pnorm(grid_x, mu_G, sigma_G) -->
+
+<!-- # try laplace instead of t -->
+<!-- mu_H <- 1 -->
+<!-- b <- 1.5 -->
+<!-- p_G <- ExtDist::pLaplace(grid_x, mu_H, b) -->
+
+<!-- par(mfrow = c(2, 2)) -->
+
+<!-- plot(grid_x, p_F, type = "l", xlab = "x", ylab = "CDF", col = "red") -->
+<!-- lines(grid_x, p_G, col = "blue") -->
+<!-- # lines(grid_x, p_H, col = "green") -->
+<!-- legend("topleft", c("F", "G"), col = c("red", "blue"), lty = 1) -->
+
+<!-- plot(grid_x, (p_F - p_G)^2, type = "l", xlab = "x", ylab = "Squared Distance", ylim = c(0, 0.5)) -->
+
+<!-- legend("topleft", c("F vs G"),col = c("lightblue"), pch = 15) -->
+
+<!-- # p_10 <- c(0.025,0.1,0.25,0.5,0.75,0.9,0.975) -->
+<!-- q_F_10 <- qnorm(p_10, mu_F, sigma_F) # quantiles of F -->
+<!-- # q_G_10 <- qnorm(p_10, mu_G, sigma_G) # quantiles of G -->
+<!-- q_G_10 <- qt(p_10, deg, lower.tail = TRUE, log.p = FALSE)# quantiles of H -->
+
+<!-- q_F_10_detailed <- detail_stepfun_cdf(q_F_10, p_10, from = -8, to = 10) -->
+<!-- q_G_10_detailed <- detail_stepfun_cdf(q_G_10, p_10, from = -8, to = 10) -->
+<!-- # q_H_10_detailed <- detail_stepfun_cdf(q_H_10, p_10, from = -8, to = 10) -->
+
+<!-- p_10_detailed <- q_F_10_detailed$x -->
+
+<!-- plot(q_F_10_detailed$x, q_F_10_detailed$p, type = "s", xlab = "x", ylab = "CDF", col = "red") -->
+<!-- lines(q_F_10_detailed$x, q_G_10_detailed$p, type = "s", col = "blue") -->
+<!-- # lines(q_F_10_detailed$x, q_H_10_detailed$p, type = "s", col = "green") -->
+
+<!-- plot(q_F_10_detailed$x, (q_F_10_detailed$p - q_G_10_detailed$p)^2, type = "s", xlab = "x", -->
+<!--      ylab = "Squared Distance", ylim = c(0, 0.5)) -->
+
+<!-- legend("topleft", c("F vs G"),col = c("lightblue"), pch = 15) -->
+<!-- ``` -->
+
+
+<!-- * Using direct numerical integration based on a fine grid of values for $x$. -->
+
+<!-- ```{r} -->
+<!-- # simple numerical integration using grid: -->
+<!-- print(paste0("CD of F vs G: ",(cd_grid <- 0.1*sum((p_F - p_G)^2)))) -->
+<!-- # print(paste0("CD of F vs H: ",(cd_grid <- 0.1*sum((p_F - p_H)^2)))) -->
+<!-- # print(paste0("CD of H vs G: ",(cd_grid <- 0.1*sum((p_H - p_G)^2)))) -->
+<!-- ``` -->
+
+<!-- * Using the first quantile-based approximation: -->
+
+<!-- ```{r} -->
+<!-- k <- length(p_10) -->
+<!-- # apply approximation for each_ -->
+<!-- p_temp <- (1:k)/(k + 1) # quantile levels -->
+<!-- q_F_temp <- qnorm(p_temp, mu_F, sigma_F) # quantiles of F -->
+<!-- # q_G_temp <- qnorm(p_temp, mu_G, sigma_G) # quantiles of G -->
+<!-- q_G_temp <- qLaplace(p_temp, mu_H, b)# quantiles of H -->
+<!-- cd_approx11 <- approx_cd1(q_F = q_F_temp, q_G = q_G_temp) # approximation -->
+<!-- # cd_approx12 <- approx_cd1(q_F = q_F_temp, q_G = q_H_temp) # approximation -->
+<!-- # cd_approx13 <- approx_cd1(q_F = q_H_temp, q_G = q_G_temp) # approximation -->
+
+<!-- print(paste0("Approx. CD of F vs G: ",cd_approx11)) -->
+<!-- # print(paste0("Approx. CD of F vs H: ",cd_approx12)) -->
+<!-- # print(paste0(" Approx. CD of H vs G: ",cd_approx13)) -->
+<!-- ``` -->
+
+<!-- * Using the second quantile-based approximation: -->
+
+<!-- ```{r} -->
+<!-- cd_approx21 <- approx_cd2(q_F = q_F_temp, q_G = q_G_temp) # approximation -->
+<!-- # cd_approx22 <- approx_cd2(q_F = q_F_temp, q_G = q_H_temp) # approximation -->
+<!-- # cd_approx23 <- approx_cd2(q_F = q_H_temp, q_G = q_G_temp) # approximation -->
+
+<!-- print(paste0("Approx. CD of F vs G: ",cd_approx21)) -->
+<!-- # print(paste0("Approx. CD of F vs H: ",cd_approx22)) -->
+<!-- # print(paste0(" Approx. CD of H vs G: ",cd_approx23)) -->
+<!-- ``` -->
+
+<!-- * Using the left-sided Riemann sum-based approximation: -->
+
+<!-- ```{r} -->
+<!-- # apply approximation for each -->
+<!-- cd_approx31 <- approx_cd_uneq(q_F = q_F_temp, tau_F = p_temp, -->
+<!--                              q_G = q_G_temp, tau_G = p_temp, -->
+<!--                              approx_rule="left-sided") # approximation -->
+<!-- # cd_approx32 <- approx_cd_uneq(q_F = q_F_temp,tau_F = p_temp, -->
+<!-- #                           q_G = q_H_temp, tau_G = p_temp, -->
+<!-- #                           approx_rule="left-sided") # approximation -->
+<!-- # cd_approx33 <- approx_cd_uneq(q_F = q_H_temp,  tau_F = p_temp, -->
+<!-- #                           q_G = q_G_temp, tau_G = p_temp, -->
+<!-- #                           approx_rule="left-sided") # approximation -->
+
+<!-- print(paste0("Approx. CD of F vs G: ",cd_approx31)) -->
+<!-- # print(paste0("Approx. CD of F vs H: ",cd_approx32)) -->
+<!-- # print(paste0(" Approx. CD of H vs G: ",cd_approx33)) -->
+<!-- ``` -->
+
+<!-- * Using the trapezoidal Riemann sum-based approximation: -->
+
+<!-- ```{r} -->
+<!-- # apply approximation for each -->
+<!-- cd_approx41 <- approx_cd_uneq(q_F = q_F_temp, tau_F = p_temp, -->
+<!--                              q_G = q_G_temp, tau_G = p_temp, -->
+<!--                              approx_rule="trapezoid") # approximation -->
+<!-- cd_approx42 <- approx_cd_uneq(q_F = q_F_temp,tau_F = p_temp, -->
+<!--                           q_G = q_H_temp, tau_G = p_temp, -->
+<!--                           approx_rule="trapezoid") # approximation -->
+<!-- cd_approx43 <- approx_cd_uneq(q_F = q_H_temp,  tau_F = p_temp, -->
+<!--                           q_G = q_G_temp, tau_G = p_temp, -->
+<!--                           approx_rule="trapezoid") # approximation -->
+
+<!-- print(paste0("Approx. CD of F vs G: ",cd_approx41)) -->
+<!-- print(paste0("Approx. CD of F vs H: ",cd_approx42)) -->
+<!-- print(paste0(" Approx. CD of H vs G: ",cd_approx43)) -->
+<!-- ``` -->
+
+<!-- ```{r,eval=FALSE} -->
+<!-- # plot: -->
+<!-- plot(values_K, cd_approx3, ylim = c(0.1, 0.4), xlab = "K", ylab = "CD", -->
+<!--      pch = 1, type = "b", log = "x", col = "darkorange") -->
+<!-- abline(h = cd_grid, col = "black") -->
+<!-- abline(h = cd_sample, col = "purple", lty = 2) -->
+<!-- legend("topright", -->
+<!--        c("grid-based", "sample-based", "left-sided Riemann sum approx."), -->
+<!--        pch = c(NA, NA, 1), lty = c(1, 2, NA), -->
+<!--        col = c("black", "purple", "darkorange"), -->
+<!--        cex=0.8) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+
+<!-- # plot: -->
+<!-- plot(values_K, cd_approx41, ylim = c(0, 0.5), xlab = "K", ylab = "CD", -->
+<!--      pch = 1, type = "b", log = "x", col = "darkorange") -->
+<!-- lines(values_K, cd_approx42, type = "b", col = "darkgreen") -->
+<!-- lines(values_K, cd_approx43, type = "b", col = "blue") -->
+<!-- lines(values_K, cd_approx44, type = "b", col = "brown") -->
+<!-- abline(h = cd_grid, col = "black") -->
+<!-- abline(h = cd_sample, col = "purple", lty = 2) -->
+<!-- legend("topright", -->
+<!--        c("grid-based", "sample-based", "quantile approx. 1", "quantile approx. 2", -->
+<!--          "uneq quantile approx. 1", "uneq quantile approx. 2"), -->
+<!--        pch = c(NA, NA, 1, 1, 1, 1), lty = c(1, 2, NA, NA,NA, NA), -->
+<!--        col = c("black", "purple", "darkorange", "darkgreen","blue","brown"), -->
+<!--        cex=0.8) -->
+<!-- ``` -->
+
+<!-- ## Implementation of decomposition in R -->
+
+<!-- A Shiny app to play around with the Cramer distance and its decomposition is available at https://jobrac.shinyapps.io/app_cramer_distance/ -->
+
+<!-- ```{r} -->
+<!-- # Simple implementation without using the interval representation -->
+<!-- # and computing decomposition -->
+<!-- approx_cd0 <- function(q_F, q_G){ -->
+<!--   K <- length(q_F) -->
+<!--   matr_q_F <- matrix(q_F, ncol = K, nrow = K) -->
+<!--   matr_q_G <- matrix(q_G, ncol = K, nrow = K, byrow = TRUE) -->
+<!--   matr_indices <- matrix(1:K, ncol = K, nrow = K) -->
+<!--   mismatches <- sign(matr_q_F - matr_q_G) != sign(matr_indices - t(matr_indices)) -->
+<!--   abs_diff <- abs(matr_q_F - matr_q_G) -->
+<!--   cd <- sum(2*mismatches*abs_diff)/K/(K + 1) -->
+<!--   cd -->
+<!-- } -->
+<!-- # helper function to evaluate interval divergence: -->
+<!-- interval_comparison <- function(l_F, u_F, alpha_F, l_G, u_G, alpha_G){ -->
+
+<!--   if((alpha_F == 0 & (l_F != u_F)) | -->
+<!--      (alpha_G == 0 & (l_G != u_G))){ -->
+<!--     stop("Upper and lower bounds of 0% prediction intervals need to be identical") -->
+<!--      } -->
+<!--   # if both PIs are at level 0% -->
+<!--   if(alpha_F == 0 & alpha_G == 0){ -->
+<!--     F_disp <- 0 -->
+<!--     G_disp <- 0 -->
+<!--     F_larger <- 4*max(l_F - l_G, 0) -->
+<!--     G_larger <- 4*max(l_G - l_F, 0) -->
+<!--   } -->
+
+<!--   # if both PIs have same level, but not 0% -->
+<!--   if(alpha_F == alpha_G & alpha_F != 0){ -->
+<!--     F_disp <- max((u_F - l_F) - (u_G - l_G), 0) -->
+<!--     G_disp <- max((u_G - l_G) - (u_F - l_F), 0) -->
+<!--     F_larger <- max(max(u_F - u_G, 0) + max(l_F - l_G, 0) + -->
+<!--                       max(l_F - u_G, 0) - F_disp - G_disp, 0) -->
+<!--     G_larger <- max(max(u_G - u_F, 0) + max(l_G - l_F, 0) + -->
+<!--                       max(l_G - u_F, 0) - F_disp - G_disp, 0) -->
+<!--   } -->
+<!--   # if F has lower nominal coverage and "should" be nested in G: -->
+<!--   if(alpha_F < alpha_G){ -->
+<!--     F_disp <- max((u_F - l_F) - (u_G - l_G), 0) -->
+<!--     G_disp <- 0 -->
+<!--     F_larger <- max(max(u_F - u_G, 0) + max(l_F - u_G, 0) - F_disp, 0) -->
+<!--     G_larger <- max(max(l_G - l_F, 0) + max(l_G - u_F, 0) - F_disp, 0) -->
+<!--   } -->
+<!--   # if G has lower nominal coverage and "should" be nested in F: -->
+<!--   if(alpha_G < alpha_F){ -->
+<!--     G_disp <- max((u_G - l_G) - (u_F - l_F), 0) -->
+<!--     F_disp <- 0 -->
+<!--     G_larger <- max(max(u_G - u_F, 0) + max(l_G - u_F, 0) - G_disp, 0) -->
+<!--     F_larger <- max(max(l_F - l_G, 0) + max(l_F - u_G, 0) - G_disp, 0) -->
+<!--   } -->
+
+<!--   id <- F_larger + G_larger + F_disp + G_disp -->
+
+<!--   return(list(id = id, -->
+<!--               F_larger = F_larger, -->
+<!--               G_larger = G_larger, -->
+<!--               F_disp = F_disp, -->
+<!--               G_disp = G_disp)) -->
+<!-- } -->
+<!-- # function to compute CD and its decomposition: -->
+<!-- approx_cd <- function(q_F, q_G){ -->
+<!--   # compute quantile levels from length of provided quantile vectors: -->
+<!--   K <- length(q_F) -->
+<!--   K_uneven <- K %% 2 == 1 -->
+<!--   if(length(q_G) != K) stop("q_F and q_G need to be of the same length") -->
+<!--   p <- (1:K)/(K + 1) # function assumes that the quantile levels are equally spaced -->
+
+<!--   n_intervals <- ceiling(K/2) # to handle uneven number of quantiles -->
+<!--   # matrices to store interval divergences and components: -->
+<!--   matrix_interval_comparisons <- -->
+<!--     matrix_F_larger <- matrix_G_larger <- -->
+<!--     matrix_F_disp <- matrix_G_disp <- -->
+<!--     matrix(NA, ncol = n_intervals, nrow = n_intervals, -->
+<!--            dimnames = list(paste("F", 1:n_intervals), paste("G", 1:n_intervals))) -->
+
+<!--   # fill these matrices: -->
+<!--   for(i in 1:n_intervals){ -->
+<!--     for(j in 1:n_intervals){ -->
+<!--       i_comp <- interval_comparison(l_F = q_F[i], u_F = q_F[K + 1 - i], -->
+<!--                                     alpha_F = p[K + 1 - i] - p[i], -->
+<!--                                     l_G = q_G[j], u_G = q_G[K + 1 - j], -->
+<!--                                     alpha_G = p[K + 1 - j] - p[j]) -->
+<!--       matrix_interval_comparisons[i, j] <- i_comp$id -->
+<!--       matrix_F_larger[i, j] <- i_comp$F_larger -->
+<!--       matrix_G_larger[i, j] <- i_comp$G_larger -->
+<!--       matrix_F_disp[i, j] <- i_comp$F_disp -->
+<!--       matrix_G_disp[i, j] <- i_comp$G_disp -->
+<!--     } -->
+<!--   } -->
+
+<!--   weights <- matrix(1, ncol = n_intervals, nrow = n_intervals) -->
+<!--   if(K_uneven){ -->
+<!--     weights[n_intervals, ] <- weights[, n_intervals] <- 0.5 -->
+<!--     weights[n_intervals, n_intervals] <- 1/4 -->
+<!--   } -->
+
+<!--   normalization <- K*(K + 1) -->
+<!--   cd <- 2*sum(matrix_interval_comparisons*weights)/normalization -->
+<!--   F_larger <- 2*sum(matrix_F_larger*weights)/normalization -->
+<!--   G_larger <- 2*sum(matrix_G_larger*weights)/normalization -->
+<!--   F_disp <- 2*sum(matrix_F_disp*weights)/normalization -->
+<!--   G_disp <- 2*sum(matrix_G_disp*weights)/normalization -->
+
+<!--   return(list(cd = cd, -->
+<!--               F_larger = F_larger, G_larger = G_larger, -->
+<!--               F_disp = F_disp, G_disp = G_disp)) -->
+<!-- } -->
+<!-- # Examples to check agreement: -->
+<!-- # with even K: -->
+<!-- K <- 10 -->
+<!-- p <- (1:K)/(K + 1) # quantile levels -->
+<!-- q_F <- qnorm(p, 12, 5) # quantiles of F -->
+<!-- q_G <- qnorm(p, 9, 4) # -->
+<!-- approx_cd0(q_F, q_G) -->
+<!-- approx_cd(q_F, q_G) -->
+<!-- # with uneven K: -->
+<!-- K <- 9 -->
+<!-- p <- (1:K)/(K + 1) # quantile levels -->
+<!-- q_F <- qnorm(p, 12, 5) # quantiles of F -->
+<!-- q_G <- qnorm(p, 9, 4) # -->
+<!-- approx_cd0(q_F, q_G) -->
+<!-- approx_cd(q_F, q_G) -->
+<!-- ``` -->

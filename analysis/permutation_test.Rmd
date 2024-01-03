@@ -1,0 +1,337 @@
+---
+title: "Permutation Test"
+author: "Nutcha Wattanachit, Johannes Bracher, Evan Ray, Nick Reich"
+date: "10/10/2022"
+header-includes:
+   - \usepackage{tabularx}
+   - \usepackage{hyperref}
+   - \usepackage{wrapfig}
+   - \usepackage{float}
+   - \usepackage{colortbl}
+   - \usepackage{pdflscape}
+   - \usepackage{tabu}
+   - \usepackage{xcolor}
+output:
+  pdf_document:
+        latex_engine: xelatex
+        fig_caption: yes
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(energy)
+library(knitr)
+library(data.table)
+library(covidHubUtils)
+library(RColorBrewer)
+library(genlasso)
+library(tseries)
+#devtools::install_github("reichlab/covidHubUtils",force=TRUE)
+library(epiprocess)
+#devtools::install_github("cmu-delphi/epiprocess",force=TRUE)
+library(lubridate)
+library(zoltr)
+library(igraph)
+library(gtools)
+library(gtable)
+library(gridExtra)
+library(grid)
+library(ggdendro)
+library(astsa)
+library(gridGraphics)
+knitr::opts_chunk$set(echo=FALSE, comment = FALSE, message=FALSE, 
+                      fig.show= 'hold',fig.pos="H",table.placement="H",
+                      warning =FALSE)
+```
+
+## Get forecast and location
+
+<!-- Select top 10 states with the highest death by the end of May 2021 (CA,TX,FL,NY,PA,IL,GA,MI,NJ,OH) -->
+The Delta wave in the fall? 8 weeks of increasing with not more than 2 negative growths, averaging more than 200 deaths during 2021-06-15 and 2021-11-01 period (this is location criteria). Take overall submissions (total submission during overall during the period in the overall analysis) into account to indicate some commitment - at 70 percents of the max of 344 sub in each location during may 2 2020 and 2021 dec 18 - excluding baseline model. 
+
+```{r}
+# get forecasts
+source("./functions/filtered_data.R")
+# models
+# s_list <- c("CEID-Walk","GT-DeepCOVID","RobertWalraven-ESG",
+#             "USC-SI_kJalpha","DDS-NBDS","LANL-GrowthRate","MIT_CritData-GBCF")
+# e_list <- c("CU-select", "Karlen-pypm", "UA-EpiCovDA", 
+#             "CovidAnalytics-DELPHI","BPagano-RtDriven","PSI-DRAFT","UMass-MechBayes")
+# get truth
+truth_prefiltered <- read.csv("./data/truth_prefiltered.csv") %>%
+   dplyr::mutate(target_end_date = as.Date(target_end_date),
+                 value = ifelse(value<0,0,value)) %>%
+   dplyr::filter(target_variable=="inc death",
+                 target_end_date >= "2021-06-15",
+                 target_end_date <= "2021-11-01",
+                 location!="US")  %>%
+  group_by(location) %>%
+  arrange(target_end_date) %>%
+  dplyr::mutate(cum_death = cumsum(value),
+                growth=((value-lag(value))/lag(value))*100,
+                avg=mean(value),
+                gmean = mean(growth,na.rm=TRUE)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(avg>=100,
+                gmean >=10,
+                !(location %in% c("39","01","04","05","06","32","40","29",
+                                  "17","26","21","42"))
+                ) 
+# second filter
+truth_prefiltered2 <- truth_prefiltered %>% 
+  dplyr::mutate(up_start=ifelse(location%in%c("47","48"),"2021-08-07",
+                                ifelse(location%in%c("12"),"2021-07-17",
+                                       ifelse(location%in%c("22"), "2021-07-10",
+                                       ifelse(location%in%c("28"), "2021-07-24",
+                                       ifelse(location%in%c("51","45"), "2021-08-14",
+                                       ifelse(location%in%c("42"), "2021-09-04",
+                                       "2021-07-31")))))
+                                ),
+                up_end=ifelse(location%in%c("47","48"),"2021-09-25",
+                              ifelse(location%in%c("12"),"2021-09-04",
+                                     ifelse(location%in%c("22"),"2021-08-28",
+                                     ifelse(location%in%c("28"),"2021-09-11",
+                                     ifelse(location%in%c("51","45"),"2021-10-02",
+                                      ifelse(location%in%c("42"),"2021-10-23",
+                                     "2021-09-18")))))
+                              )
+                )
+# get date_dat
+date_data <- truth_prefiltered2 %>%
+  dplyr::select(location,up_start,up_end) %>%
+  distinct()
+tlocs <- unique(truth_prefiltered2$location)
+# plot
+loc1 <- tlocs[1:5]
+loc2 <- tlocs[6:10]
+truth_prefiltered2 %>%
+   dplyr::filter(target_end_date >= "2021-06-15",
+                 target_end_date < "2021-11-01",
+                 location %in% loc2
+                 ) %>%
+  ggplot(aes(x=as.Date(target_end_date),y=value)) +
+  geom_line()+
+  geom_rect(aes(xmin=as.Date(up_start),xmax=as.Date(up_end), ymin=0,ymax=Inf),fill="purple",alpha=0.02)+
+  facet_wrap(~location,scales = "free",ncol=2)+
+  theme_bw()
+```
+
+```{r}
+# filter
+death_forecasts0 <- read.csv("./data/death_forecasts_prefiltered.csv") %>%
+  dplyr::mutate(target_end_date=as.Date(target_end_date),
+                 forecast_date=as.Date(forecast_date),
+                 ) 
+mods <- unique(death_forecasts0$model)
+# check process
+s_list <- c("CEID-Walk","RobertWalraven-ESG","Microsoft-DeepSTIA",
+            "USC-SI_kJalpha","LANL-GrowthRate","MUNI-ARIMA","JHU_CSSE-DECOM")
+e_list <- c("CU-select", "Karlen-pypm", "UA-EpiCovDA", "CovidAnalytics-DELPHI",
+            "BPagano-RtDriven","UMass-MechBayes","IEM_MED-CovidProject")
+death_forecasts <- death_forecasts0 %>% 
+  dplyr::filter(location %in% unique(truth_prefiltered2$location),
+                target_end_date >= min(truth_prefiltered2$up_start),
+                target_end_date <= max(truth_prefiltered2$up_end),
+                model %in% c(e_list,s_list),
+                location !="US",
+                horizon %in% c(2,4),
+                quantile!=0.4,
+                type=="quantile")
+filtered_forecasts <- data_filter_t(death_forecasts, date_data,tlocs) 
+# ####
+check <- filtered_forecasts %>%
+  group_by(location,model) %>%
+  summarise(n_com=n()) 
+check2 <- check %>%
+  filter(n_com < 352)
+# filter for final set
+filtered_fores <- filtered_forecasts %>%
+  dplyr::filter(model %in% c(e_list,s_list))
+formatted_df_t <- frame_format_ens(filtered_fores) 
+formatted_df_t2 <- frame_format_ens(filtered_fores) %>%
+  dplyr::select_if(~ !any(is.na(.)))
+write_csv(formatted_df_t2,file = "./data/formatted_df_test_fin2.csv") 
+```
+
+```{r}
+### get model types
+# not sure:  "OliverWyman-Navigator" mobs gleam"UCSD_NEU-DeepGLEAM"
+# Manually look up the descriptionf
+s_list <- c("CEID-Walk","RobertWalraven-ESG","Microsoft-DeepSTIA",
+            "USC-SI_kJalpha","LANL-GrowthRate","MUNI-ARIMA","JHU_CSSE-DECOM")
+e_list <- c("CU-select", "Karlen-pypm", "UA-EpiCovDA", "CovidAnalytics-DELPHI",
+            "BPagano-RtDriven","UMass-MechBayes","IEM_MED-CovidProject")
+# based on overall number of submissions 
+# s_list <- c("CMU-TimeSeries","CEID-Walk","JHU_CSSE-DECOM","COVIDhub-baseline",
+#             "RobertWalraven-ESG","MIT_CritData-GBCF","DDS-NBDS")
+# e_list <- c("CU-select", "Karlen-pypm", "UA-EpiCovDA", "Covid19Sim-Simulator",
+#             "UMass-MechBayes","CovidAnalytics-DELPHI","BPagano-RtDriven")
+# ## below are the old list
+# s_list_old <- c("CEID-Walk","CMU-TimeSeries","COVIDhub-baseline","GT-DeepCOVID","JHU_CSSE-DECOM",
+#             "Microsoft-DeepSTIA","MIT_CritData-GBCF","MIT_ISOLAT-Mixtures","MUNI-ARIMA",
+#             "RobertWalraven-ESG","UCSB-ACTS","UMich-RidgeTfReg","GT-DeepCOVID","IHME-CurveFit",
+#             "DDS-NBDS","UT-Mobility","USC-SI_kJalpha")
+# e_list_old <- c("BPagano-RtDriven","CovidAnalytics-DELPHI","CU-select","IEM_MED-CovidProject",
+#             "JHU_IDD-CovidSP","Karlen-pypm","MITCovAlliance-SIR","PSI-DRAFT","RPI_UW-Mob_Collision",
+#             "UA-EpiCovDA","UCLA-SuEIR","Covid19Sim-Simulator","RPI_UW-Mob_Collision","UMass-MechBayes")
+# among s models # check most statistical
+#  [1] "BPagano-RtDriven"      "CEID-Walk"             "COVIDhub-baseline"     "CU-select"             "CovidAnalytics-DELPHI"
+#  [6] "DDS-NBDS"              "GT-DeepCOVID"          "IEM_MED-CovidProject"  "JHU_CSSE-DECOM"        "Karlen-pypm"          
+# [11] "LANL-GrowthRate"       "MIT_CritData-GBCF"     "MOBS-GLEAM_COVID"      "MUNI-ARIMA"            "Microsoft-DeepSTIA"   
+# [16] "PSI-DRAFT"             "RobertWalraven-ESG"    "UA-EpiCovDA"           "UCSD_NEU-DeepGLEAM"    "UMass-MechBayes"      
+# [21] "USC-SI_kJalpha" 
+```
+
+## Run Test
+
+Take mean over the dates so we have one pair for each location-horizon.
+
+```{r}
+library(combinat)
+source("./functions/distance_func_script.R")
+# check columns
+# check <- read.csv("./data/formatted_df_test_fin.csv") 
+# cnames <- colnames(check)[8:ncol(check)]
+
+# get non repeat distance data 
+# set model types
+s_list <- c("CEID.Walk","RobertWalraven.ESG","Microsoft.DeepSTIA",
+            "USC.SI_kJalpha","LANL.GrowthRate","MUNI.ARIMA","JHU_CSSE.DECOM")
+e_list <- c("CU.select", "Karlen.pypm", "UA.EpiCovDA", "CovidAnalytics.DELPHI",
+            "BPagano.RtDriven","UMass.MechBayes","IEM_MED.CovidProject")
+test_dist <- read.csv("./data/analysis_data/norepeat_distance_test.csv") %>%
+  dplyr::select(-"n_dates") %>%
+  dplyr::filter(model_1 %in% c(s_list,e_list),
+                model_2 %in% c(s_list,e_list)) %>%
+  dplyr::mutate(model1_type=ifelse(model_1 %in% s_list, "stats","mech"),
+                model2_type=ifelse(model_2 %in% s_list, "stats","mech"))
+type_dat <- data.frame(cbind(c(s_list,e_list),c(rep("stats",7),rep("mech",7))))
+names(type_dat) <- c("model","type")
+perm_list <- t(combn(type_dat$model,7))
+full_list <- matrix(NA,nrow=nrow(perm_list),ncol=14)
+for(i in 1:nrow(perm_list)){
+  full_list[i,] <- c(c(perm_list[i,]), unlist(setdiff(c(s_list,e_list),perm_list[i,])))
+}
+full_list <- data.frame(full_list) 
+full_list$group_p <- 1:nrow(full_list)
+full_list <- full_list %>%
+  pivot_longer(cols=1:14,names_to = "model") %>%
+  dplyr::transmute(group_p=group_p,
+                   model=value)
+full_list$type <- rep(c(rep("stats",7),rep("mech",7)),3432)
+# run stats between/within
+# test_dist_mean <- test_dist %>%
+#   dplyr::group_by(model_1,model_2,horizon,location) %>%
+#   dplyr::mutate(mean_cd = sum(approx_cd)) %>%
+#   dplyr::ungroup() %>%
+#   dplyr::select(-c("target_end_date","approx_cd")) %>%
+#   distinct() %>%
+#   dplyr::mutate(approx_cd=mean_cd)
+# stats <- perm_test(full_list,test_dist)
+stats2 <- perm_test(full_list,test_dist)
+# stats23 <- perm_test2l(full_list,test_dist)
+# statsl <- perm_test2l(full_list,test_dist_mean)
+# write_csv(stats,file = "./data/analysis_data/perm_stats.csv") 
+write_csv(stats2,file = "./data/analysis_data/perm_stats2.csv") 
+# write_csv(stats23,file = "./data/analysis_data/perm_stats2_w.csv") 
+#write_csv(statsl,file = "./data/analysis_data/perm_stats2_log.csv") 
+```
+
+```{r}
+check11 <- mean(test_dist$approx_cd[test_dist$model1_type==test_dist$model2_type & test_dist$horizon==2])
+check21 <- mean(test_dist$approx_cd[test_dist$model1_type!=test_dist$model2_type & test_dist$horizon==2])
+check21/check11
+```
+
+```{r}
+check11 <- mean(test_dist$approx_cd[test_dist$model1_type==test_dist$model2_type & test_dist$horizon==4])
+check21 <- mean(test_dist$approx_cd[test_dist$model1_type!=test_dist$model2_type & test_dist$horizon==4])
+check21/check11
+```
+
+## Check
+
+```{r}
+inspect1 <- test_dist %>%
+      dplyr::filter(horizon==2) %>%
+      dplyr::mutate(pair_type=ifelse(model1_type==model2_type,"within","between"))
+bet1 <- sum(inspect1$approx_cd[inspect1$pair_type=="between"])
+with1 <- sum(inspect1$approx_cd[inspect1$pair_type=="within"])
+mean_ratio_1 <- bet1/with1
+```
+
+
+
+<!-- # Simulation study -->
+
+<!-- ```{r} -->
+<!-- set.seed(123) -->
+<!-- # simulate forecast -->
+<!-- q_set <- round(c(0.010,0.025,seq(0.050,0.950,0.050),0.975,0.990), digits = 3) -->
+<!-- nsim <- 1000 -->
+<!-- time_points <- 11 -->
+<!-- ts.sim1 <- ts.sim2 <- ts.sim3 <-ts.sim4 <-  matrix(NA,nrow=(time_points-1), ncol=nsim ) -->
+<!-- for(i in 1:nsim){ -->
+<!--   ts.sim1[,i] <- arima.sim(list(order = c(1,0,0), ar = 0.4,include.mean=TRUE),mean=5,sd = sqrt(0.15),  -->
+<!--                            n = time_points)[2:time_points] -->
+<!--   ts.sim2[,i] <- arima.sim(list(order = c(1,0,0), ar = 0.8,include.mean=TRUE),mean=8,sd = sqrt(1),  -->
+<!--                            n = time_points)[2:time_points] -->
+<!--   ts.sim3[,i] <- arima.sim(list(order = c(1,0,0), ar = 0.4,include.mean=TRUE),mean=5,sd = sqrt(0.17),  -->
+<!--                            n = time_points)[2:time_points] -->
+<!--   ts.sim4[,i] <- arima.sim(list(order = c(1,0,0), ar = 0.8,include.mean=TRUE),mean=8,sd = sqrt(1.1),  -->
+<!--                            n = time_points)[2:time_points] -->
+<!-- } -->
+<!-- # do odd same group, even diff group -->
+<!-- sim_forecasts1 <- sim_forecasts2 <- sim_forecasts3 <- sim_forecasts4 <-  -->
+<!--   matrix(NA,nrow=(time_points-1), ncol=23) -->
+<!-- for(t in 1:(time_points-1)){ -->
+<!--   sim_forecasts1[t,] <- quantile(ts.sim1[t,],probs=q_set) -->
+<!--   sim_forecasts2[t,] <- quantile(ts.sim2[t,],probs=q_set) -->
+<!--   sim_forecasts3[t,] <- quantile(ts.sim3[t,],probs=q_set) -->
+<!--   sim_forecasts4[t,] <- quantile(ts.sim4[t,],probs=q_set) -->
+<!-- } -->
+<!-- # calculate distance START HERE -->
+<!-- dist1 <- matrix(NA,nrow=(time_points-1)*2, ncol=2) -->
+<!-- dist2 <- matrix(NA,nrow=(time_points-1)*4, ncol=2) -->
+<!-- for(t in 1:(time_points-1)){ -->
+<!--   # calculate distance START HERE -->
+<!-- dist1[t,1] <- calc_cramers_dist_one_model_pair(sim_forecasts1[t,], -->
+<!--                                            tau_F-q_set, -->
+<!--                                            sim_forecasts3[t,], -->
+<!--                                            tau_G=q_set, -->
+<!--                                            approx_rule="left_sided_riemann") -->
+<!-- dist1[t,2] <- "within" -->
+<!-- dist1[(time_points-1)+t,1] <- calc_cramers_dist_one_model_pair(sim_forecasts2[t,], -->
+<!--                                            tau_F-q_set, -->
+<!--                                            sim_forecasts4[t,], -->
+<!--                                            tau_G=q_set, -->
+<!--                                            approx_rule="left_sided_riemann") -->
+<!-- dist1[(time_points-1)+t,2] <- "within" -->
+<!-- # between -->
+<!-- dist2[t,1] <- calc_cramers_dist_one_model_pair(sim_forecasts1[t,], -->
+<!--                                            tau_F-q_set, -->
+<!--                                            sim_forecasts2[t,], -->
+<!--                                            tau_G=q_set, -->
+<!--                                            approx_rule="left_sided_riemann") -->
+<!-- dist2[t,2] <- "between" -->
+<!-- dist2[(time_points-1)+t,1] <- calc_cramers_dist_one_model_pair(sim_forecasts1[t,], -->
+<!--                                            tau_F-q_set, -->
+<!--                                            sim_forecasts4[t,], -->
+<!--                                            tau_G=q_set, -->
+<!--                                            approx_rule="left_sided_riemann") -->
+<!-- dis2[(time_points-1)+t,2] <- "between" -->
+<!-- dist2[(time_points-1)+t,1] <- calc_cramers_dist_one_model_pair(sim_forecasts2[t,], -->
+<!--                                            tau_F-q_set, -->
+<!--                                            sim_forecasts3[t,], -->
+<!--                                            tau_G=q_set, -->
+<!--                                            approx_rule="left_sided_riemann") -->
+<!-- dis2[(time_points-1)+t,2] <- "between" -->
+<!-- dist2[(time_points-1)+t,1] <- calc_cramers_dist_one_model_pair(sim_forecasts4[t,], -->
+<!--                                            tau_F-q_set, -->
+<!--                                            sim_forecasts3[t,], -->
+<!--                                            tau_ G=q_set, -->
+<!--                                            approx_rule="left_sided_riemann") -->
+<!-- dis2[(time_points-1)+t,2] <- "between" -->
+<!-- } -->
+<!-- # run test -->
+<!-- ``` -->

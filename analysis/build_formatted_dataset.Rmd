@@ -1,0 +1,829 @@
+---
+title: "Forecast Data for COVID-19 Forecast Similarity Analysis"
+author: "Johannes Bracher, Evan Ray, Nick Reich, Nutcha Wattanachit"
+header-includes:
+   - \usepackage{tabularx}
+   - \usepackage{hyperref}
+   - \usepackage{wrapfig}
+   - \usepackage{float}
+   - \usepackage{colortbl}
+   - \usepackage{pdflscape}
+   - \usepackage{tabu}
+   - \usepackage{xcolor}
+output:
+  pdf_document:
+        latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(energy)
+library(knitr)
+library(data.table)
+library(covidHubUtils)
+library(RColorBrewer)
+#devtools::install_github("reichlab/covidHubUtils",force=TRUE)
+library(lubridate)
+library(zoltr)
+library(igraph)
+library(gtools)
+library(gtable)
+library(gridExtra)
+library(grid)
+library(ggdendro)
+library(gridGraphics)
+knitr::opts_chunk$set(echo=FALSE,
+                       comment = FALSE, message=FALSE, fig.show= 'hold',fig.pos="H",table.placement="H",
+                       fig.align = 'center',warning =FALSE)
+```
+
+# Forecast inclusion criteria
+
+* Models: All models with complete submissions for the following criteria (applied to death and case forecasts separately)
+* Targets: 1-4 wk ahead inc death and inc case
+* Forecast dates: Nov 2nd, 2020 - Jan 10th,2022 - we may relax this depending on the situation - now apply 90\% to the max n_dates
+* Probability levels: All (maybe do at least half? - check in sim if they yield about the same results)
+* Locations: 4 large states and national level - NY (36), TX (48), FL (12), CA (06)
+
+
+```{r}
+# load in scripts
+source("./functions/filtered_data.R")
+```
+
+## Load pre-filtered data
+
+```{r}
+melocs <- read.csv("./data/locations.csv")
+locs <- melocs$location[1:52]
+# dup_list <- c("COVIDhub-ensemble","COVIDhub-trained_ensemble","COVIDhub_CDC-ensemble")
+death_forecasts <- read.csv("./data/death_forecasts_prefiltered.csv") %>%
+      dplyr::mutate(target_end_date=as.Date(target_end_date),
+                 forecast_date=as.Date(forecast_date),
+                 # location = ifelse(location>=10,as.character(location),paste0("0",as.character(location)))
+                 ) %>%
+   dplyr::filter(location %in% locs,
+                 target_end_date > "2020-03-01",
+                 target_end_date < "2021-12-31") 
+# hosp_forecasts <- read.csv("./data/hosp_forecasts_prefiltered.csv") %>%
+#    dplyr::filter(!(model %in% dup_list),
+#                  location %in% locs) %>%
+#    dplyr::mutate(target_end_date=as.Date(target_end_date),
+#                  forecast_date=as.Date(forecast_date))
+# quantiles
+alpha_levels <- round(c(0.010,0.025,seq(0.050,0.950,0.050),0.975,0.990), digits = 3)
+unique(death_forecasts$location)
+```
+
+## Latest: build overall analysis data set
+
+```{r}
+```
+
+## Get scores
+
+```{r}
+truth <- read.csv("./data/truth_prefiltered.csv") %>%
+   dplyr::mutate(location = ifelse(location<10,paste0("0",location),as.character(location)),
+                 target_end_date = as.Date(target_end_date)) %>%
+   dplyr::filter(target_variable=="inc death",
+                 target_end_date > "2020-09-01",
+                 target_end_date < "2021-12-31")
+
+truth1<- truth %>%
+   dplyr::filter(location %in% locs[1:26])
+truth2<- truth %>%
+   dplyr::filter(location %in% locs[27:52])
+death_forecasts1 <- death_forecasts %>%
+   dplyr::filter(location %in% locs[1:26])
+death_forecasts2 <- death_forecasts %>%
+   dplyr::filter(location %in% locs[27:52])
+
+score_data1 <- score_forecasts(death_forecasts1,truth1,return_format = "long")
+score_data2 <- score_forecasts(death_forecasts2,truth2,return_format = "long")
+score_data <- rbind(score_data1,score_data2)
+write_csv(score_data,file = "./data/score_df.csv") 
+score_data <- score_data %>%
+   dplyr::filter(score_name=="wis") %>%
+   dplyr::group_by(location,target_end_date,horizon) %>%
+   dplyr::mutate(rank=rank(score_value,na.last="keep"))
+write_csv(score_data,file = "./data/score_rank.csv") 
+
+score_data <- read.csv("./data/score_rank.csv")
+score_data_top <- score_data %>%
+   dplyr::filter(!is.na(score_value)) %>%
+   dplyr::mutate(forecast_date=(as.Date(target_end_date)-(horizon*7))+2) %>%
+   dplyr::group_by(location,target_end_date,horizon) %>%
+   dplyr::filter(rank %in% c(1:round(max(rank)/1.15))) %>%
+   dplyr::ungroup()
+write_csv(score_data_top,file = "./data/score_rank_top.csv") 
+
+locs_test <- c("12","18","48","13","01")
+score_data_top <-  datedat%>%
+   left_join(score_data_top, by=c("location","forecast_date")) %>%
+   dplyr::group_by(model)  %>%
+   dplyr::filter(n_distinct(location)==5) %>%
+   dplyr::ungroup()
+decent_models <- unique(score_data_top$model)
+```
+
+```{r}
+## normal
+filtered_dforecasts <- data_filter(death_forecasts, alpha_levels,locs,
+                                   sdate=as.Date("2021-02-14"),edate=as.Date("2021-12-11")) 
+formatted_df <- frame_format(filtered_dforecasts)
+formatted_df$forecast_date <- as.Date(formatted_df$forecast_date, origin = "1970-01-01")
+# save formatted 
+# write_csv(date_set,file = "./data/formatted_hf_date_info.csv") 
+write_csv(formatted_df,file = "./data/formatted_df.csv") 
+#write_csv(formatted_hf,file = "./data/formatted_hf.csv")
+```
+
+## Ensemble data set 
+
+```{r}
+filtered_dforecasts_fo <- data_filter_ens(death_forecasts, alpha_levels,locs,
+                                   sdate=as.Date("2021-02-14"),edate=as.Date("2021-12-11")) 
+# filtered_hforecasts_fo <- data_filter_ens(hosp_forecasts, alpha_levels,locs,
+#                                    sdate=as.Date("2021-02-14"),edate=as.Date("2021-10-18")) 
+# save filtered data
+write_csv(filtered_dforecasts_fo,file = "./data/filtered_df_ens.csv")
+#write_csv(filtered_hforecasts_fo,file = "./data/filtered_hf_ens.csv")
+```
+
+## Format
+
+```{r}
+# format
+formatted_df2 <- frame_format_ens(filtered_dforecasts_fo) 
+#formatted_hf2 <- frame_format_ens(filtered_hforecasts_fo) 
+
+write_csv(formatted_df2,file = "./data/formatted_df_ens.csv")
+#write_csv(formatted_hf2,file = "./data/formatted_hf_ens.csv")
+```
+
+
+## Make forecast_date-based data sets
+
+```{r}
+## normal
+filtered_dforecasts_fdate <- data_filter_fdate(death_forecasts, alpha_levels,locs,
+                                   sdate=as.Date("2020-10-15"),edate=as.Date("2021-12-11")) 
+formatted_df_fdate <- frame_format(filtered_dforecasts_fdate)
+formatted_df_fdate$forecast_date <- as.Date(formatted_df_fdate$forecast_date, origin = "1970-01-01")
+# hospitalizations
+# filtered_hforecasts_fdate <- data_filter_fdate(hosp_forecasts, alpha_levels,locs,
+#                                    sdate=as.Date("2020-12-11"),edate=as.Date("2021-12-11")) 
+# filtered_hforecasts_fdate$forecast_date <- as.Date(filtered_hforecasts_fdate$forecast_date, origin = "1970-01-01")
+# formatted_hf_fdate <- frame_format(filtered_hforecasts_fdate) 
+# formatted_hf_fdate$forecast_date <- as.Date(formatted_hf_fdate$forecast_date, origin = "1970-01-01")
+
+# save formatted 
+#write_csv(date_set2,file = "./data/formatted_hf_date_info_fdate.csv") 
+write_csv(formatted_df_fdate,file = "./data/formatted_df_fdate.csv") 
+#write_csv(formatted_hf_fdate,file = "./data/formatted_hf_fdate.csv")
+```
+
+<!-- # Get statistical models -->
+
+<!-- ```{r} -->
+<!-- # Manually look up the description -->
+<!-- stats_names <- c("CEID-Walk","CMU-TimeSeries","CUBoulder-COVIDLSTM", -->
+<!--                  "Geneva-DetGrowth","GT-DeepCOVID","JHUAPL-Gecko", -->
+<!--                  "MIT_ISOLAT-Mixtures","MUNI-ARIMA","MUNI-VAR", -->
+<!--                  "UMass-trends_ensemble","WalmartLabsML-LogForecasting") -->
+<!-- # Check submission dates for these models -->
+<!-- death_stats_dates <- death_forecasts %>% -->
+<!--    dplyr::filter(model %in% stats_names) %>% -->
+<!--    dplyr::group_by(model,forecast_date) %>% -->
+<!--    dplyr::transmute(forecast_date=forecast_date, -->
+<!--                     submit=TRUE) %>% -->
+<!--    dplyr::ungroup() %>% -->
+<!--    distinct() %>% -->
+<!--    pivot_wider(id_cols=c(forecast_date),names_from = model,values_from = submit)  -->
+<!-- death_stats_dates[is.na(death_stats_dates)] <- FALSE -->
+<!-- # hosp_stats_dates <- hosp_forecasts %>% -->
+<!-- #    dplyr::filter(model %in% stats_names) %>% -->
+<!-- #    dplyr::group_by(model,forecast_date) %>% -->
+<!-- #    dplyr::transmute(forecast_date=forecast_date, -->
+<!-- #                     submit=TRUE) %>% -->
+<!-- #    dplyr::ungroup() %>% -->
+<!-- #    distinct() %>% -->
+<!-- #    pivot_wider(id_cols=c(forecast_date),names_from = model,values_from = submit)  -->
+<!-- # hosp_stats_dates[is.na(hosp_stats_dates)] <- FALSE -->
+<!-- # get statistics -->
+<!-- death_stats <- colSums(death_stats_dates[,c(3:8)]) -->
+<!-- # hosp_stats <- colSums(hosp_stats_dates[,c(3:6)]) -->
+<!-- # select CU-timeseries and CEID-Walk -->
+<!-- ddates <- death_stats_dates %>% -->
+<!--    dplyr::select(c("forecast_date","MIT_ISOLAT-Mixtures","CEID-Walk")) %>% -->
+<!--    dplyr::filter(`MIT_ISOLAT-Mixtures`==TRUE & `CEID-Walk`==TRUE)  -->
+<!-- # # select JHUAPL-Gecko for hosp -->
+<!-- # hdates <- hosp_stats_dates %>% -->
+<!-- #    dplyr::select(c("forecast_date","JHUAPL-Gecko")) %>% -->
+<!-- #    dplyr::filter(`JHUAPL-Gecko`==TRUE) -->
+
+<!-- ## normal -->
+<!-- filtered_dforecasts_s <- data_filter_stats(death_forecasts, alpha_levels,locs,ddates$forecast_date)  -->
+<!-- formatted_df_s <- frame_format(filtered_dforecasts_s) -->
+<!-- formatted_df_s$forecast_date <- as.Date(formatted_df_s$forecast_date, origin = "1970-01-01") -->
+<!-- # # hospitalizations -->
+<!-- # filtered_hforecasts_s <- data_filter_stats(hosp_forecasts, alpha_levels,locs,hdates$forecast_date)  -->
+<!-- # formatted_hf_s <- frame_format(filtered_hforecasts_s)  -->
+<!-- # formatted_hf_s$forecast_date <- as.Date(formatted_hf_s$forecast_date, origin = "1970-01-01") -->
+
+<!-- # save formatted  -->
+<!-- write_csv(filtered_dforecasts_s,file = "./data/filtered_df_stats.csv") -->
+<!-- #write_csv(filtered_hforecasts_s,file = "./data/filtered_hf_stats.csv") -->
+<!-- write_csv(formatted_df_s,file = "./data/formatted_df_stats.csv")  -->
+<!-- #write_csv(formatted_hf_s,file = "./data/formatted_hf_stats.csv") -->
+<!-- ``` -->
+
+# Get test data at pre peak
+
+```{r}
+# finding most inc deaths by aug 31 2020
+# get truth
+truth_prefiltered <- read.csv("./data/truth_prefiltered.csv") %>%
+   dplyr::mutate(target_end_date = as.Date(target_end_date),
+                 value = ifelse(value<0,0,value)) %>%
+   dplyr::filter(target_variable=="inc death")
+
+# case have to be twice the average of the previous 1 month
+truth_p <- truth_prefiltered %>%
+  # dplyr::filter(location %in% locs_test) %>%
+   dplyr::group_by(location) %>%
+   dplyr::arrange(location,target_end_date) %>%
+   dplyr::mutate(
+      maxv = max(value[target_end_date>"2021-06-15" & target_end_date<"2021-11-30"]),
+      peak_winter=ifelse(value==maxv,TRUE,FALSE),
+      avg_2mo = mean(value[target_end_date>=(target_end_date[peak_winter==TRUE]-56) &
+                              target_end_date<(target_end_date[peak_winter==TRUE]-35)]),
+      wk_change=diff(c(0,value),lag = 1),
+      # increasing rate for 4 weeks
+      rate=ifelse(value!=0 & lag(value,1)!=0,round(wk_change/lag(value,1),2),0),
+      up_15p=ifelse(rate>=0.15,TRUE,FALSE),
+      # find near 0 rate with at least 3 weeks of near zero before
+      led2=(lead(value,3)-lead(value,1))/lead(value,1),
+      gr=(lead(value,3)-value)/value,
+      up_wave = ifelse(up_15p==TRUE & 
+                          target_end_date < target_end_date[peak_winter==TRUE] &
+                          maxv >= avg_2mo*1.8 &
+                          target_end_date+28 < target_end_date[peak_winter==TRUE] & 
+                          gr>=0.6 & 
+                          led2>=0.2,
+                      TRUE,
+                      FALSE)
+      ) %>%
+   dplyr::filter(up_wave==TRUE,
+                 target_end_date>"2021-06-15" & target_end_date<"2021-11-30") %>%
+   dplyr::ungroup() %>%
+   dplyr::group_by(location) %>%
+   dplyr::filter(target_end_date==target_end_date[which.max(rate)]) %>%
+   dplyr::ungroup()
+
+# save 
+write_csv(truth_p,file = "./data/up_truth.csv") 
+# 
+# date 
+datedat <- rbind(truth_p[,c(3:4)]) %>%
+   dplyr::mutate(forecast_date=(as.Date(target_end_date)-7)+2) %>%
+   dplyr::select(-"target_end_date") %>%
+   dplyr::mutate(phase="pre_peak")
+locs_test <- datedat$location
+truth_prefiltered %>%
+   dplyr::left_join(truth_p,by=c("location")) %>%
+   dplyr::filter(target_end_date.x > "2021-01-15",
+                 target_end_date.x < "2021-12-15",
+                location %in% locs_test) %>%
+  ggplot(aes(x=as.Date(target_end_date.x),y=value.x)) +
+  geom_line()+
+  geom_vline(aes(xintercept=as.Date(target_end_date.y),color="red"))+
+  geom_vline(aes(xintercept=as.Date(target_end_date.y)+28,color="red"))+
+  facet_wrap(~location,scales = "free",nrow=5)
+
+# remove no wave
+datedat <- rbind(truth_p[,c(3:4)]) %>%
+   dplyr::mutate(forecast_date=(as.Date(target_end_date)-7)+2) %>%
+   dplyr::select(-"target_end_date") %>%
+   dplyr::mutate(phase="pre_peak") %>%
+   #"51","53", "54", "45","28","22"
+   dplyr::filter(!location %in% c("08","19","23","26","30","33","36",
+                                  "38","40","46","49","56","US","15","02",
+                                  "34","05","51","54"))
+locs_test <- datedat$location
+# save 
+truth_p %>%
+   dplyr::filter(location %in% locs_test) %>%
+   write_csv(.,file = "./data/up_truth.csv") 
+# # get scores
+# score_rank_top <- read.csv("./data/score_rank_top.csv") %>%
+#    dplyr::mutate(location = ifelse(location<10,paste0("0",location),as.character(location)),
+#                  forecast_date=as.Date(forecast_date))
+# score_data_top <-  datedat %>%
+#    left_join(score_rank_top, by=c("location","forecast_date")) %>%
+#    dplyr::group_by(model)  %>%
+#    dplyr::filter(location %in% locs_test,
+#                  horizon %in% c(1,4)) %>%
+#    dplyr::ungroup()
+# decent_models <- unique(score_data_top$model)
+# Manually look up the description
+s_list <- c("CEID-Walk","CMU-TimeSeries","COVIDhub-baseline","GT-DeepCOVID","JHU_CSSE-DECOM",
+            "Microsoft-DeepSTIA","MIT_CritData-GBCF","MIT_ISOLAT-Mixtures","MUNI-ARIMA",
+            "RobertWalraven-ESG","UCSB-ACTS","UMich-RidgeTfReg","GT-DeepCOVID","IHME-CurveFit",
+            "DDS-NBDS","UT-Mobility","USC-SI_kJalpha")
+e_list <- c("BPagano-RtDriven","CovidAnalytics-DELPHI","CU-select","IEM_MED-CovidProject",
+            "JHU_IDD-CovidSP","Karlen-pypm","MITCovAlliance-SIR","PSI-DRAFT","RPI_UW-Mob_Collision",
+            "UA-EpiCovDA","UCLA-SuEIR","Covid19Sim-Simulator","RPI_UW-Mob_Collision","UMass-MechBayes")
+# cut_out <- c("UT-Mobility","RPI_UW-Mob_Collision","UCLA-SuEIR",
+#              "UCSB-ACTS","Covid19Sim-Simulator","JHUAPL-Bucky",
+#              "Karlen-pypm","MOBS-GLEAM_COVID","COVIDhub-baseline")
+# too many missing in the all dates- only include model with submission on last date in the long list (missing between okay)
+# missing more than 8000/23 entries
+cut_out <- c("JHUAPL-Bucky","COVIDhub-baseline", "CEID-Walk",
+             "IEM_MED-CovidProject", "JHU_IDD-CovidSP")
+mods <- c("COVIDhub-4_week_ensemble","COVIDhub_CDC-ensemble","COVIDhub-ensemble","COVIDhub-trained_ensemble",
+          "epiforecasts-ensemble1","KITmetricslab-select_ensemble","UCSD_NEU-DeepGLEAM",
+          "SteveMcConnell-CovidComplete","MIT-Cassandra","LANL-GrowthRate","IowaStateLW-STEM","NotreDame-mobility",
+          "OliverWyman-Navigator","Columbia_UNC-SurvCon",cut_out)
+# start filtering
+filtered_dforecasts_tf <- data_filter_test(death_forecasts, alpha_levels,locs_test,datedat,"pre_peak",s_list,mods) 
+formatted_df_tf <- frame_format_ens(filtered_dforecasts_tf) %>%
+   dplyr::mutate(phase="pre_peak") %>%
+   dplyr::select_if(~ !any(is.na(.)))
+# colSums(is.na(formatted_df_tf[,8:ncol(formatted_df_tf)]))/(23*4)
+mods1 <- colnames(formatted_df_tf)[-c(1:7,ncol(formatted_df_tf))]
+# um_check <- formatted_df_tf %>%
+#    filter(quantile==0.4) 
+```
+
+# Get test data at pre peak 2
+
+```{r}
+# finding most inc deaths by aug 31 2020
+# get truth
+# truth_prefiltered %>%
+#   dplyr::filter(target_end_date > "2020-08-15",
+#                 target_end_date < "2021-12-15",
+#                 location %in% locs[1:15]) %>%
+#   ggplot(aes(x=as.Date(target_end_date),y=value)) +
+#   geom_line()+
+#   facet_wrap(~location,scales = "free",nrow=5)
+
+# case have to be twice the average of the previous 1 month
+truth_p <- truth_prefiltered %>%
+  # dplyr::filter(location %in% locs_test) %>%
+   dplyr::group_by(location) %>%
+   dplyr::arrange(location,target_end_date) %>%
+   dplyr::mutate(
+      maxv = max(value[target_end_date>"2020-09-15" & target_end_date<"2021-03-30"]),
+      peak_winter=ifelse(value==maxv,TRUE,FALSE),
+      avg_2mo = mean(value[target_end_date>=(target_end_date[peak_winter==TRUE]-56) &
+                              target_end_date<(target_end_date[peak_winter==TRUE]-35)]),
+      wk_change=diff(c(0,value),lag = 1),
+      # increasing rate for 4 weeks
+      rate=ifelse(value!=0 & lag(value,1)!=0,round(wk_change/lag(value,1),2),0),
+      up_15p=ifelse(rate>=0.15,TRUE,FALSE),
+      # find near 0 rate with at least 3 weeks of near zero before
+      led2=(lead(value,3)-lead(value,1))/lead(value,1),
+      gr=(lead(value,3)-value)/value,
+      up_wave = ifelse(up_15p==TRUE & 
+                          target_end_date < target_end_date[peak_winter==TRUE] &
+                          maxv >= avg_2mo*1.8 &
+                          target_end_date+28 < target_end_date[peak_winter==TRUE] & 
+                          gr>=0.6 & 
+                          led2>=0.2,
+                      TRUE,
+                      FALSE)
+      ) %>%
+   dplyr::filter(up_wave==TRUE,
+                 target_end_date>"2020-09-15" & target_end_date<"2021-03-30") %>%
+   dplyr::ungroup() %>%
+   dplyr::group_by(location) %>%
+   dplyr::filter(target_end_date==target_end_date[which.max(rate)]) %>%
+   dplyr::ungroup()
+
+# save 
+write_csv(truth_p,file = "./data/up_truth2.csv") 
+# 
+# date 
+datedat <- rbind(truth_p[,c(3:4)]) %>%
+   dplyr::mutate(forecast_date=(as.Date(target_end_date)-7)+2) %>%
+   dplyr::select(-"target_end_date") %>%
+   dplyr::mutate(phase="pre_peak")
+locs_test <- datedat$location
+truth_prefiltered %>%
+   dplyr::left_join(truth_p,by=c("location")) %>%
+   dplyr::filter(target_end_date.x > "2020-09-15",
+                 target_end_date.x < "2021-06-15",
+                location %in% locs_test) %>%
+  ggplot(aes(x=as.Date(target_end_date.x),y=value.x)) +
+  geom_line()+
+  geom_vline(aes(xintercept=as.Date(target_end_date.y),color="red"))+
+  geom_vline(aes(xintercept=as.Date(target_end_date.y)+28,color="red"))+
+  facet_wrap(~location,scales = "free",nrow=5)
+
+# remove no wave
+datedat2 <- rbind(truth_p[,c(3:4)]) %>%
+   dplyr::mutate(forecast_date=(as.Date(target_end_date)-7)+2) %>%
+   dplyr::select(-"target_end_date") %>%
+   dplyr::mutate(phase="pre_peak") %>%
+   dplyr::filter(!location %in% c("US"))
+locs_test <- datedat$location
+# save 
+truth_p %>%
+   dplyr::filter(location %in% locs_test) %>%
+   write_csv(.,file = "./data/up_truth2.csv") 
+# # get scores
+# score_rank_top <- read.csv("./data/score_rank_top.csv") %>%
+#    dplyr::mutate(location = ifelse(location<10,paste0("0",location),as.character(location)),
+#                  forecast_date=as.Date(forecast_date))
+# score_data_top <-  datedat %>%
+#    left_join(score_rank_top, by=c("location","forecast_date")) %>%
+#    dplyr::group_by(model)  %>%
+#    dplyr::filter(location %in% locs_test,
+#                  horizon %in% c(1,4)) %>%
+#    dplyr::ungroup()
+# decent_models <- unique(score_data_top$model)
+# Manually look up the description
+s_list <- c("CEID-Walk","CMU-TimeSeries","COVIDhub-baseline","GT-DeepCOVID","JHU_CSSE-DECOM",
+            "Microsoft-DeepSTIA","MIT_CritData-GBCF","MIT_ISOLAT-Mixtures","MUNI-ARIMA",
+            "RobertWalraven-ESG","UCSB-ACTS","UMich-RidgeTfReg","GT-DeepCOVID","IHME-CurveFit",
+            "DDS-NBDS","UT-Mobility","USC-SI_kJalpha")
+e_list <- c("BPagano-RtDriven","CovidAnalytics-DELPHI","CU-select","IEM_MED-CovidProject",
+            "JHU_IDD-CovidSP","Karlen-pypm","MITCovAlliance-SIR","PSI-DRAFT","RPI_UW-Mob_Collision",
+            "UA-EpiCovDA","UCLA-SuEIR","Covid19Sim-Simulator","RPI_UW-Mob_Collision","UMass-MechBayes")
+# cut_out <- c("UT-Mobility","RPI_UW-Mob_Collision","UCLA-SuEIR",
+#              "UCSB-ACTS","Covid19Sim-Simulator","JHUAPL-Bucky",
+#              "Karlen-pypm","MOBS-GLEAM_COVID","COVIDhub-baseline")
+# too many missing in the all dates- only include model with submission on last date in the long list (missing between okay)
+# missing more than 8000/23 entries
+cut_out <- c("JHUAPL-Bucky","COVIDhub-baseline", "CEID-Walk",
+             "IEM_MED-CovidProject", "JHU_IDD-CovidSP")
+mods <- c("COVIDhub-4_week_ensemble","COVIDhub_CDC-ensemble","COVIDhub-ensemble","COVIDhub-trained_ensemble",
+          "epiforecasts-ensemble1","KITmetricslab-select_ensemble","UCSD_NEU-DeepGLEAM",
+          "SteveMcConnell-CovidComplete","MIT-Cassandra","LANL-GrowthRate","IowaStateLW-STEM","NotreDame-mobility",
+          "OliverWyman-Navigator","Columbia_UNC-SurvCon",cut_out)
+# start filtering
+filtered_dforecasts_tf <- data_filter_test(death_forecasts, alpha_levels,locs_test,datedat,"pre_peak",s_list,mods) 
+formatted_df_tf <- frame_format_ens(filtered_dforecasts_tf) %>%
+   dplyr::mutate(phase="pre_peak") %>%
+   dplyr::select_if(~ !any(is.na(.)))
+# colSums(is.na(formatted_df_tf[,8:ncol(formatted_df_tf)]))/(23*4)
+mods1 <- colnames(formatted_df_tf)[-c(1:7,ncol(formatted_df_tf))]
+# um_check <- formatted_df_tf %>%
+#    filter(quantile==0.4) 
+```
+
+# get test data - post peak
+
+```{r}
+# truth_prefiltered %>%
+#   dplyr::filter(target_end_date < "2021-12-31",
+#                 target_end_date > "2021-01-01",
+#                 location %in% locs[41:52]) %>%
+#   ggplot(aes(x=as.Date(target_end_date),y=value)) +
+#   geom_line()+
+#   facet_wrap(~location,scales = "free",nrow=6)
+
+# case have to be twice the average of the previous 1 month
+truth_postp <- truth_prefiltered %>%
+  dplyr::filter(location %in% locs_test) %>%
+   dplyr::group_by(location) %>%
+   dplyr::arrange(location,target_end_date) %>%
+   dplyr::mutate(
+      maxv = max(value[target_end_date>"2021-06-15" & target_end_date<"2021-11-15"]),
+      peak_winter=ifelse(value==maxv,TRUE,FALSE),
+      avg_2mo = mean(value[target_end_date>=(target_end_date[peak_winter==TRUE]-77) & target_end_date<(target_end_date[peak_winter==TRUE]-42)]),
+      wk_change=diff(c(0,value),lag = 1),
+      # increasing rate for 4 weeks
+      rate=ifelse(value!=0,wk_change/value,0),
+      up_15p=ifelse(rate>=0.15,TRUE,FALSE),
+      # find near 0 rate with at least 3 weeks of near zero before
+      nearz=ifelse(lag(rate)<0.1|lag(rate)>-0.1,TRUE,FALSE),
+      gr=ifelse((((lead(value,4)-value)/value)>=0.8)&(((lead(value,2)-value)/value)>=0.6),TRUE,FALSE),
+      # add lowest growth in -+2 week
+      up_wave = ifelse(up_15p==TRUE & 
+                          target_end_date <= target_end_date[peak_winter==TRUE] &
+                          nearz==TRUE & 
+                          maxv >= avg_2mo*2 & 
+                          gr==TRUE,
+                       TRUE,
+                       FALSE)
+      ) %>%
+   dplyr::filter(target_end_date == target_end_date[peak_winter==TRUE],
+                 target_end_date>"2021-06-15" & target_end_date<"2021-11-15") %>%
+   dplyr::ungroup() %>%
+   dplyr::group_by(location) %>%
+   #dplyr::filter(target_end_date==min(target_end_date)) %>%
+   dplyr::ungroup()
+
+# save 
+write_csv(truth_postp,file = "./data/down_truth.csv") 
+truth_prefiltered %>%
+   dplyr::left_join(truth_postp,by=c("location")) %>%
+   dplyr::filter(target_end_date.x > "2021-01-15",
+                 target_end_date.x < "2021-12-15",
+                location %in% locs_test) %>%
+  ggplot(aes(x=as.Date(target_end_date.x),y=value.x)) +
+  geom_line()+
+  geom_vline(aes(xintercept=as.Date(target_end_date.y)+7,color="red"))+
+  geom_vline(aes(xintercept=as.Date(target_end_date.y)+35,color="red"))+
+  facet_wrap(~location,scales = "free",nrow=5)
+# 
+# date 
+datedat2 <- rbind(truth_postp[,c(3:4)]) %>%
+   dplyr::mutate(forecast_date=as.Date(target_end_date)+2) %>%
+   dplyr::select(-"target_end_date") %>%
+   dplyr::mutate(phase="pre_peak")
+# start filtering
+filtered_dforecasts_tfp <- data_filter_test(death_forecasts, alpha_levels,locs_test,datedat2,"pre_peak",s_list,mods) 
+# filter
+formatted_df_tfp <- frame_format_ens(filtered_dforecasts_tfp) %>%
+   dplyr::mutate(phase="pre_peak") %>%
+   dplyr::select_if(~ !any(is.na(.)))
+#colSums(is.na(formatted_df_tfp[,8:ncol(formatted_df_tfp)]))/(23*4)
+mods2 <- colnames(formatted_df_tfp)[-c(1:7,ncol(formatted_df_tfp))]
+```
+
+# get test data - post peak 2
+
+```{r}
+# truth_prefiltered %>%
+#   dplyr::filter(target_end_date < "2021-12-31",
+#                 target_end_date > "2021-01-01",
+#                 location %in% locs[41:52]) %>%
+#   ggplot(aes(x=as.Date(target_end_date),y=value)) +
+#   geom_line()+
+#   facet_wrap(~location,scales = "free",nrow=6)
+
+# case have to be twice the average of the previous 1 month
+truth_postp <- truth_prefiltered %>%
+  dplyr::filter(location %in% locs_test) %>%
+   dplyr::group_by(location) %>%
+   dplyr::arrange(location,target_end_date) %>%
+   dplyr::mutate(
+      maxv = max(value[target_end_date>"2020-09-15" & target_end_date<"2021-03-30"]),
+      peak_winter=ifelse(value==maxv,TRUE,FALSE),
+      avg_2mo = mean(value[target_end_date>=(target_end_date[peak_winter==TRUE]-77) & target_end_date<(target_end_date[peak_winter==TRUE]-42)]),
+      wk_change=diff(c(0,value),lag = 1),
+      # increasing rate for 4 weeks
+      rate=ifelse(value!=0,wk_change/value,0),
+      up_15p=ifelse(rate>=0.15,TRUE,FALSE),
+      # find near 0 rate with at least 3 weeks of near zero before
+      nearz=ifelse(lag(rate)<0.1|lag(rate)>-0.1,TRUE,FALSE),
+      gr=ifelse((((lead(value,4)-value)/value)>=0.8)&(((lead(value,2)-value)/value)>=0.6),TRUE,FALSE),
+      # add lowest growth in -+2 week
+      up_wave = ifelse(up_15p==TRUE & 
+                          target_end_date <= target_end_date[peak_winter==TRUE] &
+                          nearz==TRUE & 
+                          maxv >= avg_2mo*2 & 
+                          gr==TRUE,
+                       TRUE,
+                       FALSE)
+      ) %>%
+   dplyr::filter(target_end_date == target_end_date[peak_winter==TRUE],
+                 target_end_date>"2020-09-15" & target_end_date<"2021-03-30") %>%
+   dplyr::ungroup() %>%
+   dplyr::group_by(location) %>%
+   #dplyr::filter(target_end_date==min(target_end_date)) %>%
+   dplyr::ungroup()
+
+# save 
+write_csv(truth_postp,file = "./data/down_truth.csv") 
+truth_prefiltered %>%
+   dplyr::left_join(truth_postp,by=c("location")) %>%
+   dplyr::filter(target_end_date.x > "2020-09-15",
+                 target_end_date.x < "2021-06-15",
+                location %in% locs_test) %>%
+  ggplot(aes(x=as.Date(target_end_date.x),y=value.x)) +
+  geom_line()+
+  geom_vline(aes(xintercept=as.Date(target_end_date.y)+7,color="red"))+
+  geom_vline(aes(xintercept=as.Date(target_end_date.y)+35,color="red"))+
+  facet_wrap(~location,scales = "free",nrow=5)
+# 
+# date 
+datedat2 <- rbind(truth_postp[,c(3:4)]) %>%
+   dplyr::mutate(forecast_date=as.Date(target_end_date)+2) %>%
+   dplyr::select(-"target_end_date") %>%
+   dplyr::mutate(phase="pre_peak")
+# start filtering
+filtered_dforecasts_tfp <- data_filter_test(death_forecasts, alpha_levels,locs_test,datedat2,"pre_peak",s_list,mods) 
+# filter
+formatted_df_tfp <- frame_format_ens(filtered_dforecasts_tfp) %>%
+   dplyr::mutate(phase="pre_peak") %>%
+   dplyr::select_if(~ !any(is.na(.)))
+#colSums(is.na(formatted_df_tfp[,8:ncol(formatted_df_tfp)]))/(23*4)
+mods2 <- colnames(formatted_df_tfp)[-c(1:7,ncol(formatted_df_tfp))]
+```
+
+# Save data
+
+```{r}
+mods_f <- intersect(mods1,mods2)
+#mods3 <- mods1
+# pre
+filtered_dforecasts_tf <- filtered_dforecasts_tf %>%
+   dplyr::filter(model %in% mods_f)
+formatted_df_tf <- formatted_df_tf %>%
+   dplyr::select(colnames(formatted_df_tf)[c(1:7)],all_of(mods_f))
+# save formatted 
+write_csv(filtered_dforecasts_tf,file = "./data/long_df_test.csv") 
+write_csv(formatted_df_tf,file = "./data/formatted_df_test.csv") 
+
+# pre peak 2
+mods3 <- mods1
+# pre
+filtered_dforecasts_tf <- filtered_dforecasts_tf %>%
+   dplyr::filter(model %in% mods_f)
+formatted_df_tf <- formatted_df_tf %>%
+   dplyr::select(colnames(formatted_df_tf)[c(1:7)],all_of(mods_f))
+# save formatted 
+write_csv(filtered_dforecasts_tf,file = "./data/long_df_test_p2.csv") 
+write_csv(formatted_df_tf,file = "./data/formatted_df_test_p2.csv") 
+# post
+filtered_dforecasts_tfp <- filtered_dforecasts_tfp %>%
+   dplyr::filter(model %in% mods_f)
+formatted_df_tfp <- formatted_df_tfp %>%
+   dplyr::select(colnames(formatted_df_tfp)[c(1:7)],all_of(mods_f))
+# save formatted
+write_csv(filtered_dforecasts_tfp,file = "./data/long_df_test_post.csv")
+write_csv(formatted_df_tfp,file = "./data/formatted_df_test_post.csv")
+# post 2 
+filtered_dforecasts_tfp <- filtered_dforecasts_tfp %>%
+   dplyr::filter(model %in% mods_f)
+formatted_df_tfp <- formatted_df_tfp %>%
+   dplyr::select(colnames(formatted_df_tfp)[c(1:7)],all_of(mods_f))
+# save formatted
+write_csv(filtered_dforecasts_tfp,file = "./data/long_df_test_post2.csv")
+write_csv(formatted_df_tfp,file = "./data/formatted_df_test_post2.csv")
+```
+
+# get test data plot
+
+```{r}
+# start filtering
+mods3 <- intersect(mods1,mods2)
+filtered_dforecasts_t <- data_filter_test2(death_forecasts, alpha_levels,locs_test,mods3) 
+# filter
+formatted_df_t <- frame_format_ens(filtered_dforecasts_t) 
+# %>%
+#    dplyr::group_by(location,forecast_date) %>%
+#    drop_na() %>%
+#    dplyr::ungroup()
+colSums(is.na(formatted_df_t[,8:ncol(formatted_df_t)]))/(23*4)
+# save formatted 
+write_csv(formatted_df_t,file = "./data/formatted_df_test_alldates.csv") 
+```
+
+# Get overall data
+
+```{r}
+# Manually look up the description
+filtered_dforecasts_g <- overall_filter(death_forecasts)
+unique(filtered_dforecasts_g$model)
+```
+
+## Get list names 
+
+```{r}
+forecast_filter <- function(distance_frame){
+  filtered_data <- distance_frame %>%
+    dplyr::filter(!(location %in% c("US","15")),
+                  target_end_date >= "2020-11-01",
+                  target_end_date <= "2021-12-31") %>%
+    # filter out for each location-horizon models that have less than 90% sub
+    dplyr::group_by(location, horizon, model) %>%
+    dplyr::mutate(n_dates=n_distinct(target_end_date)) %>%
+    dplyr::ungroup() %>%
+    dplyr::group_by(horizon) %>%
+    dplyr::mutate(nh_dates = n_distinct(target_end_date)) %>%
+    dplyr::ungroup() %>%
+    dplyr::group_by(horizon, model) %>%
+    dplyr::filter(all(n_dates>=(0.9*nh_dates))) %>%
+    dplyr::ungroup() 
+  return(filtered_data)
+} 
+
+named_model <- forecast_filter(filtered_dforecasts_g)
+unique(named_model$model)
+```
+
+# Get regression data
+
+```{r}
+# find increase and decrease, find 5 peaks (change max lines), check conditions below
+# then get up and down points around each peak - and identify 
+# truth_p2 <- truth_prefiltered %>%
+#    dplyr::mutate(value = ifelse(value<0,0,value)) %>%
+#    dplyr::filter(target_variable=="inc death",
+#                  target_end_date>"2020-10-15" & target_end_date<"2021-12-31") %>%
+#    dplyr::group_by(location) %>%
+#    dplyr::arrange(location,target_end_date) %>%
+#    dplyr::mutate(
+#       maxv = ifelse(value %in% tail(sort(value),5), TRUE, FALSE),
+#       avg_2mo = mean(value[target_end_date>=(target_end_date[maxv==TRUE]-56) & target_end_date<(target_end_date[maxv==TRUE]-28)]),
+#       wk_change=diff(c(0,value),lag = 1),
+#       # increasing rate for 4 weeks
+#       rate=ifelse(value!=0,wk_change/value,0),
+#       up_20p=ifelse(rate>=0.20,TRUE,FALSE),
+#       # find near 0 rate with at least 3 weeks of near zero before
+#       nearz=ifelse(rate<0.08|rate>0.08,TRUE,FALSE),
+#       nearz1=ifelse((lag(nearz)<0.08|lag(nearz)>0.08) & (lag(nearz,2)<0.08|lag(nearz,2)>0.08) & 
+#                        (lag(nearz,3)<0.08|lag(nearz,3)>0.08),TRUE,FALSE),
+#       up_wave = ifelse(up_20p==TRUE & target_end_date <= target_end_date[maxv==TRUE] &
+#                           nearz==TRUE & nearz1==TRUE & value[maxv==TRUE] >= avg_2mo*1.5,
+#                        TRUE,
+#                        FALSE),
+#          #### add at peak
+#       peak = ifelse(target_end_date == target_end_date[maxv==TRUE] &  value[maxv==TRUE] >= avg_2mo*1.5,
+#                        TRUE,
+#                        FALSE)
+#       ) %>%
+#       dplyr::ungroup() %>%
+#    #### add y var as indicator
+#    dplyr::mutate(up_wave =ifelse(is.na(up_wave),FALSE,up_wave),
+#                  changes=ifelse(up_wave==TRUE,
+#                                 1,
+#                                 ifelse(peak==TRUE,2,0))
+#                  ) 
+# truth_p2 <- truth_prefiltered %>%
+#    dplyr::mutate(value = ifelse(value<0,0,value)) %>%
+#    dplyr::filter(location %in% locs_test, target_variable=="inc death",
+#                  target_end_date>"2020-10-15" & target_end_date<"2021-12-31") %>%
+#    dplyr::group_by(location) %>%
+#    dplyr::arrange(location,target_end_date) %>%
+#    dplyr::mutate(
+#       maxv = ifelse(value %in% tail(sort(value),20), TRUE, FALSE),
+#       avg_2mo = mean(value[target_end_date>=(target_end_date[maxv==TRUE]-56) & target_end_date<(target_end_date[maxv==TRUE]-28)]),
+#       wk_change=diff(c(0,value),lag = 1),
+#       # increasing rate for 4 weeks
+#       rate=ifelse(value!=0,wk_change/value,0),
+#       up_15p=ifelse(rate>=0.15,TRUE,FALSE),
+#       # find near 0 rate with at least 3 weeks of near zero before
+#       # add lowest growth in -+2 week
+#       nearz=ifelse(lag(rate)<0.1|lag(rate)>-0.1,TRUE,FALSE),
+#       gr=ifelse((((lead(value,4)-value)/value)>=0.6)&(((lead(value,2)-value)/value)>=0.25),TRUE,FALSE),
+#       # add lowest growth in -+2 week
+#       up_wave = ifelse(up_15p==TRUE & 
+#                           target_end_date <= target_end_date[maxv==TRUE] &
+#                           nearz==TRUE & 
+#                           value[maxv==TRUE] >= avg_2mo*1.5 & 
+#                           gr==TRUE,
+#                        TRUE,
+#                        FALSE),
+#       #### add at peak
+#       peak = ifelse(maxv==TRUE & value[maxv==TRUE] >= avg_2mo*1.5,
+#          #target_end_date == target_end_date[maxv==TRUE] 
+#                     #&  value[maxv==TRUE] >= avg_2mo*1.5,
+#                        TRUE,
+#                        FALSE)
+#       ) %>%
+#       dplyr::ungroup() %>%
+#    #### add y var as indicator
+#    dplyr::mutate(up_wave =ifelse(is.na(up_wave),FALSE,up_wave),
+#                  changes=ifelse(up_wave==TRUE,
+#                                 1,
+#                                 ifelse(peak==TRUE,2,0))
+#                  )
+
+truth_p2 <- truth_prefiltered %>%
+   dplyr::mutate(value = ifelse(value<0,0,value)) %>%
+   dplyr::filter(location %in% locs_test, target_variable=="inc death",
+                 target_end_date>"2020-10-15" & target_end_date<"2021-12-31") %>%
+   dplyr::group_by(location) %>%
+   dplyr::arrange(location,target_end_date) %>%
+   dplyr::mutate(
+      maxv = ifelse(value %in% tail(sort(value),20), TRUE, FALSE),
+      #avg_2mo = mean(value[target_end_date>=(target_end_date[maxv==TRUE]-56) & target_end_date<(target_end_date[maxv==TRUE]-28)]),
+      wk_change=diff(c(0,value),lag = 1),
+      # increasing rate for 4 weeks
+      rate=ifelse(value!=0,wk_change/value,0),
+      up_15p=ifelse(rate>=0.15,TRUE,FALSE),
+      nearz=ifelse(lag(rate)<0.1|lag(rate)>-0.1,TRUE,FALSE),
+      gr=ifelse((((lead(value,4)-value)/value)>=0.6)&(((lead(value,2)-value)/value)>=0.25),TRUE,FALSE),
+      # add lowest growth in -+2 week
+      up_wave = ifelse(up_15p==TRUE & 
+                          target_end_date <= target_end_date[maxv==TRUE] &
+                          nearz==TRUE & 
+                          gr==TRUE,
+                       TRUE,
+                       FALSE),
+      #### add at peak
+      peak = ifelse(maxv==TRUE,
+         #target_end_date == target_end_date[maxv==TRUE] 
+                    #&  value[maxv==TRUE] >= avg_2mo*1.5,
+                       TRUE,
+                       FALSE)
+      ) %>%
+      dplyr::ungroup() %>%
+   #### add y var as indicator
+   dplyr::mutate(up_wave =ifelse(is.na(up_wave),FALSE,up_wave),
+                 changes=ifelse(up_wave==TRUE,
+                                1,
+                                ifelse(peak==TRUE,2,0))
+                 )
+# have to add 2 dates to get forecast dates to calculate dissimilarity for all horizons
+write_csv(truth_p2,file = "./data/change_moment_dat.csv") 
+```
+

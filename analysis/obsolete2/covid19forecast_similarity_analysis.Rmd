@@ -1,0 +1,805 @@
+---
+title: "COVID-19 Forecast Similarity Analysis"
+author: "Johannes Bracher, Evan Ray, Nick Reich, Nutcha Wattanachit"
+date: "10/25/2021"
+header-includes:
+   - \usepackage{tabularx}
+   - \usepackage{hyperref}
+   - \usepackage{wrapfig}
+   - \usepackage{float}
+   - \usepackage{colortbl}
+   - \usepackage{pdflscape}
+   - \usepackage{tabu}
+   - \usepackage{xcolor}
+output:
+  pdf_document:
+        latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(energy)
+library(knitr)
+library(data.table)
+library(covidHubUtils)
+library(RColorBrewer)
+#devtools::install_github("reichlab/covidHubUtils",force=TRUE)
+library(lubridate)
+library(zoltr)
+library(igraph)
+library(gtools)
+library(gtable)
+library(gridExtra)
+library(grid)
+library(ggdendro)
+library(gridGraphics)
+knitr::opts_chunk$set(echo=FALSE,
+                       comment = FALSE, message=FALSE, fig.show= 'hold',fig.pos="H",table.placement="H",
+                       fig.align = 'center',warning =FALSE)
+```
+
+# Goals
+
+* Check model types and their dissimilarity on average (heatmaps and boxplot)
+* Check the above for inflection points and stable periods (can we use differences to predict inflection point?), rather than inflections, maybe the begining and the end of a wave...or maybe think of this as onsets, peaks, end of waves??..
+* Decomposition by type analysis
+* Test for difference in group mean dissimilarity (small sample,repeated measures,non-normal, maybe unequal group samples for cases) - maybe if we don't aggregate and treat these like repeated measures in a mixture structure to increase n
+* Note: ensemble excluded.
+* Test if diversity in an ensemble is associated with performance (simulations).
+
+# Forecast inclusion criteria
+
+* Models: All models with complete submissions for the following criteria (applied to death and case forecasts separately)
+* Targets: 1-4 wk ahead inc death and inc case
+* Target end dates: Oct 19th, 2020 - Sep 18th,2021
+* Probability levels: All
+* Locations:
+   + 5 states with highest cumulative deaths by February 27th, 2021: CA, FL, NY, PA, TX
+   + 5 states with highest cumulative cases by February 27th, 2021: CA, FL, IL, NY, TX
+   <!-- + 5 states with lowest cumulative deaths by February 27th, 2021: AK, HI, ME, VT, WY -->
+   <!-- + 5 states with lowest cumulative cases by February 27th, 2021: DC, HI, ME, VT, WY -->
+   
+## 1-4 Week Ahead Incident Death Forecasts
+
+<!--cramer distance offer more direct details about dissimilarity between two forecasts than WIS, whose decomposition is wrt to truth--->
+
+```{r}
+source("../functions/distance_func_script.R")
+source("../functions/decomposition.R")
+```
+
+```{r,cache=TRUE}
+# set targets for analysis
+target_horizon <- 1:4
+target_var <- c("inc death","inc case")
+wide_frame_death <- read.csv("../data/quantile_frame.csv") %>%
+  dplyr::filter(!(model %in% c("CU-nochange","CU-scenario_high","CU-scenario_low","CU-scenario_mid",
+                               "COVIDhub-4_week_ensemble")))
+wide_frame_case <- read.csv("../data/quantile_frame_inc.csv") %>%
+  dplyr::filter(!(model %in% c("CU-nochange","CU-scenario_high","CU-scenario_low","CU-scenario_mid",
+                               "COVIDhub-4_week_ensemble")))
+d_frame <- frame_format(wide_frame_death) 
+c_frame <- frame_format(wide_frame_case) 
+high_truth <- read.csv("../data/truth_deathcase_h.csv") %>%
+  dplyr::mutate(target_end_date_x = as.character(as.Date(target_end_date)+7)) %>%
+  dplyr::select(-c("X","target_end_date")) %>%
+  dplyr::filter(location!="17")
+high_truth <- high_truth[,c(1:2,ncol(high_truth),4:ncol(high_truth)-1)]
+# low_truth <- read.csv("../data/truth_deathcase_l.csv") %>%
+#   dplyr::mutate(target_end_date_x = as.character(as.Date(target_end_date)+7)) %>%
+#   dplyr::select(-c("X","target_end_date"))
+# low_truth <- low_truth[,c(1:2,ncol(low_truth),4:ncol(low_truth)-1)]
+
+#--------------- death forecasts calculation----------------------#
+# calculate distance matrices
+# high
+q_set <- unique(d_frame$quantile) 
+d_frame1 <- d_frame %>%
+  dplyr::filter(location %in% c(6,36,48,12,42))
+approx_cd_list <-  suppressWarnings(build_distance_frame(d_frame1,
+                                        horizon_list=c(1:4),
+                                        target_list="inc death",
+                                        approx_rule="approximation2",
+                                        tau_F=q_set,tau_G=q_set))
+# extract data
+total_frame <- approx_cd_list[[1]] %>%
+  dplyr::mutate(pair=paste(model_1,model_2,sep=" vs ")) %>%
+  dplyr::group_by(horizon,target_variable,target_end_date,pair) %>%
+  dplyr::mutate(mean_approx_cd=mean(approx_cd)) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(-c("approx_cd","location")) %>%
+  dplyr::distinct()
+total_frame$target_end_date <- as.Date(total_frame$target_end_date,origin="1970-01-01")
+
+d_frame_mean <- lapply(1:4, function(x) cd_matrix(approx_cd_list[[3]],x))
+
+# # low
+# d_frame2 <- d_frame %>%
+#   dplyr::filter(location %in% c(2,15,23,50,56)) 
+# approx_cd_list_low <- suppressWarnings(build_distance_frame(d_frame2,
+#                                         horizon_list=c(1:4),
+#                                         target_list="inc death",
+#                                         approx_rule="approximation2",
+#                                         tau_F=q_set,tau_G=q_set))
+# # extract data
+# total_frame_low <- approx_cd_list_low[[1]] %>%
+#   dplyr::mutate(pair=paste(model_1,model_2,sep=" vs ")) %>%
+#   dplyr::group_by(horizon,target_variable,target_end_date,pair) %>%
+#   dplyr::mutate(mean_approx_cd=mean(approx_cd)) %>%
+#   dplyr::ungroup() %>%
+#   dplyr::select(-c("approx_cd","location")) %>%
+#   dplyr::distinct()
+# total_frame_low$target_end_date <- as.Date(total_frame_low$target_end_date,origin="1970-01-01")
+# 
+# d_frame_mean_low <- lapply(1:4, function(x) cd_matrix(approx_cd_list_low[[3]],x))
+#--------------- case forecast calculation----------------------#
+#
+#
+#
+#
+#
+#----------------metadata---------------------------------------#
+metadata <- read.csv("../fixed_meta.csv") 
+d_meta <- colnames(d_frame)[-c(1:6)]
+d_types <- metadata %>%
+  dplyr::filter(model_abbr %in% d_meta) %>%
+  dplyr::group_by(model_abbr) %>%
+  dplyr::filter(date==max(date)) %>%
+  dplyr::ungroup() %>%
+  dplyr::select("model_abbr","methods","methods_long","compartmental")
+# c_meta <- colnames(c_frame)[-c(1:6)]
+```
+
+There are 9 models that fulfilled the criteria for the 5 locations with highest cumulative deaths. Below is an example of approximated Cramér distances between COVIDhub-ensemble and Karlen-pypm for 1-4 week ahead forecasts of incident deaths in CA in the week of 01/11/2021. 
+
+```{r,cache=TRUE}
+# proof of concept 
+fdat <- load_forecasts(models = c("COVIDhub-ensemble","Karlen-pypm"),
+                              dates = c("2020-10-31","2021-01-11","2021-05-08"),
+                              source = "zoltar",
+                              date_window_size = 6,
+                              locations = "06",
+                              types = c("quantile", "point"), 
+                              verbose = FALSE,
+                              targets = paste(1:4, "wk ahead inc death"))
+
+p <- plot_forecasts(fdat, 
+               target_variable = "inc death", 
+               truth_source = "JHU",
+               intervals = c(.95), 
+               facet = model~.,
+               fill_by_model = TRUE,
+               facet_ncol=1,
+               plot=FALSE,
+               title="none",
+               subtitle="none",
+               show_caption=FALSE) 
+
+p_formatted <- p + 
+  scale_x_date(name=NULL, date_breaks = "1 months", date_labels = "%b-%y",
+               limits = c(as.Date("2020-10-17"), as.Date("2021-09-04")))+
+  theme(axis.text.x = element_text(angle=90, hjust=-0.2),
+        legend.position = "none")
+
+for(i in 1:4){
+    p <- d_frame %>%
+      dplyr::filter(horizon==i,
+                    target_end_date==as.Date("2021-01-16")+(7*(i-1)),
+                    location==6) %>%
+      .[,grep("COVIDhub-ensemble|Karlen-pypm|quantile",colnames(d_frame))] 
+    assign(paste0("p",i),
+           plot_step(p,"COVIDhub-ensemble","Karlen-pypm",i)
+           )
+}
+legend = gtable_filter(ggplot_gtable(ggplot_build(p1)), "guide-box")
+```
+
+```{r,fig.align='center',out.width='80%',out.height='80%'}
+# grid.arrange(p_formatted,p1,p2,p3,p4, layout_matrix = lay)
+grid.arrange(p_formatted, 
+             arrangeGrob(p1 + theme(legend.position="none"),
+                         p2 + theme(legend.position="none"), 
+                         p3 + theme(legend.position="none"),
+                         p4 + theme(legend.position="none"),
+                         legend,
+                         heights=c(1,1,1,1, 0.3),
+                         ncol = 1),
+             ncol=2,top = "Location: CA, Forecast date: 2020-10-31, 2021-01-11, 2021-05-08")
+```
+
+```{r}
+knitr::kable(d_types[,c(1,ncol(d_types))], col.names = c("Model","Mechanistic"))
+```
+
+### Mean approximated pairwise distances across all forecast weeks
+
+The $x-$axis is arranged based in an ascending order of the model's approximate pairwise distance from the COVIDhub-ensemble. So, the first model is the model that is most dissimilar (on average across all horizons) to the ensemble in this time frame. The observations below are based on the plots. Note the scale of approx. CD is much smaller for the locations with low cumulative deaths (despite the same color scale). 
+
+For locations with high cumulative deaths:
+
+* The mean approx CD between pairs of forecasts are higher for further forecast horizons
+* CU-select is, on average across all horizons, most dissimilar to the ensemble
+* CU-select seems to be most dissimillar to other models for 1-2 wk ahead horizons, while UA-EpiCovDA is most dissimilar to other models for 2-4 wk ahead horizons.
+For locations with low cumulative deaths:
+* We see only little bit of the trend in the first bullet point 
+* For all horizons, UCSD_NEU-DeepGLEAM is noticeably most dissimilar from other models, UA-EpiCovDA is perhaps the second most dissimilar.
+
+
+```{r heat,fig.align='center',out.width='80%',out.height='60%'}
+distance_heatmap(approx_cd_list[[3]],
+                 "Mean Approx. CD of Inc Death Forecasts by Horizon - Average over CA, FL, NY, PA, TX",
+                 d_types)
+# distance_heatmap(approx_cd_list_low[[3]],
+#                  "Mean Approx. CD of Inc Death Forecasts by Horizon - Average over AK, HI, ME, VT, WY",
+#                  d_types)
+```
+
+From the boxplots by location:
+
+* Less outliers for locations with high cumulative deaths 
+* For locations with high cumulative deaths, while the range of approx. CDs for all unique model pairs might be different, the relationship between locations are about the same across all horizons. So, averaging across locations to reduce the granularity makes sense. Though we might not be able  to say the same thing for locations with low cumulative deaths, the differences are probably too small for us to care.
+
+```{r cat,fig.align='center',out.width='80%',out.height='70%'}
+catbox_plot3(approx_cd_list[[2]],
+             "Mean Approx. CD of Inc Death Forecasts\n by Horizon - CA, FL, NY, PA, TX")
+# cat2 <- catbox_plot3(approx_cd_list_low[[2]],
+#              "Mean Approx. CD of Inc Death Forecasts\n by Horizon - AK, HI, ME, VT, WY")
+# grid.arrange(cat1,cat2,ncol=2)
+```
+
+### A mechanistic model type and similarity
+
+<!-- These are the same plots as in the previous section for inc death forecasts, but for inc case forecasts. It seems there is only one pair of model that are both mechanistic. We see higher medians of the mean approx. cd when one of the models in a pair is mechanistic for both high and low count locations. -->
+
+```{r}
+all_data <- total_frame %>%
+  dplyr::group_by(horizon,target_end_date) %>%
+  dplyr::filter(model_1 !=model_2) %>%
+  dplyr:: ungroup() %>%
+  dplyr::distinct(horizon,target_end_date,mean_approx_cd,.keep_all = TRUE)
+# all_data2 <- total_frame_low %>%
+#   dplyr::group_by(horizon,target_end_date) %>%
+#   dplyr::filter(model_1 !=model_2) %>%
+#   dplyr:: ungroup() %>%
+#   dplyr::distinct(horizon,target_end_date,mean_approx_cd,.keep_all = TRUE)
+
+type_dat <- all_data %>%
+  dplyr::left_join(d_types,by=c("model_1"="model_abbr")) %>%
+  dplyr::left_join(d_types,by=c("model_2"="model_abbr")) %>%
+  dplyr::mutate(model1_type=compartmental.x,
+                model2_type=compartmental.y,
+                pair_type=ifelse(model1_type != model2_type,
+                                 "mismatched",
+                                 ifelse(model1_type==TRUE & model2_type==TRUE,
+                                        "both", "neither"))) %>%
+  .[,c(1:7,16)]
+
+# type_dat_low <- all_data2 %>%
+#   dplyr::left_join(d_types,by=c("model_1"="model_abbr")) %>%
+#   dplyr::left_join(d_types,by=c("model_2"="model_abbr")) %>%
+#   dplyr::mutate(model1_type=compartmental.x,
+#                 model2_type=compartmental.y,
+#                 pair_type=ifelse(model1_type != model2_type,
+#                                  "mismatched",
+#                                  ifelse(model1_type==TRUE & model2_type==TRUE,
+#                                         "both", "neither"))) %>%
+#   .[,c(1:7,16)]
+
+type_dat_mean <- type_dat %>%
+  dplyr::group_by(horizon,pair) %>%
+  dplyr::mutate(mean_cd=mean(mean_approx_cd)) %>%
+  dplyr::ungroup() %>%
+  dplyr::distinct(horizon,mean_cd,pair_type,pair,.keep_all=FALSE)
+
+# type_dat_meanl <- type_dat_low %>%
+#   dplyr::group_by(horizon,pair) %>%
+#   dplyr::mutate(mean_cd=mean(mean_approx_cd)) %>%
+#   dplyr::ungroup() %>%
+#   dplyr::distinct(horizon,mean_cd,pair_type,pair,.keep_all=FALSE)
+```
+
+```{r,fig.align='center',fig.height=3,fig.width=6}
+# print heatmapes
+# for(loc in loc_name$location){
+#   print(do.call(get,list(paste0("p_",loc))))
+# }
+catbox_plot4(type_dat_mean,"High Death Locations")
+# l_box<- catbox_plot4(type_dat_meanl,"Low Death Locations")
+# grid.arrange(h_box,l_box,ncol=2)
+#catbox_plot(pair_data_low,"Low Case Count Locations")
+
+#type_bar1 <- 
+
+# type_dat_mean %>%
+#   dplyr::group_by(pair_type, horizon) %>%
+#   dplyr::summarize(mean=mean(mean_cd),sd_2=2*sd(mean_cd)) %>%
+#   dplyr::ungroup() %>%  
+#   ggplot(.,aes(x=as.factor(horizon), y=mean,color=pair_type)) + 
+#   geom_line() +
+#   geom_point()+
+#   geom_errorbar(aes(ymin=mean-sd_2, ymax=mean+sd_2), width=.2,
+#                  position=position_dodge(0.05))
+```
+
+### Hierarchical clustering based on mean approx. CD across all weeks and locations
+
+```{r,fig.cap="High Case Count Locations",fig.height=4}
+#for(i in 1:4){
+    # assign(paste0("dpd_",i),
+    #        dendro_plot(i, "d_frame_mean_low",d_types)
+    #          )
+    # assign(paste0("dpl_",i),
+    #        dendro_plot(i, "c_frame_mean_low",short_meta_low)
+    #          )
+    # assign(paste0("dpdl_",i),
+    #        dendro_plot(i, "c_frame_mean_low",short_data_low,FALSE)
+    #          )
+#  } 
+dp_1 <- dendro_plot(1, "d_frame_mean",d_types, 80)
+dp_2 <- dendro_plot(2, "d_frame_mean",d_types, 100)
+dp_3 <- dendro_plot(3, "d_frame_mean",d_types, 120)
+dp_4 <- dendro_plot(4, "d_frame_mean",d_types, 148)
+            
+grid.arrange(dp_1,dp_2,dp_3,dp_4,nrow=2)
+#grid.arrange(dpd_1,dpd_2,dpd_3,dpd_4,nrow=2)
+
+```
+
+### Boxplots and Hierarchical clustering based on mean approx. CD overll vs after peak week 
+
+<!-- We can also look at the mean approximated pairwise distances across locations to see how the models become more similar or dissimilar over time.  Note the x-axis of the plot is the target end dates. The granularity of the date scale is larger for the observed incident deaths, but it's possible to compare (roughly). Compare overall clustering by location to clustering at peak... -->
+
+```{r}
+# now aggregate, but maybe do by state
+# high_combt <- high_truth %>%
+#   dplyr::filter(target_variable=="inc death") %>%
+#   dplyr::group_by(target_end_date_x) %>%
+#   dplyr::mutate(sum_value=sum(value)) %>%
+#   dplyr::ungroup() %>%
+#   dplyr::mutate(target_end_date_x=as.Date(target_end_date_x)) %>%
+#   dplyr::select("target_end_date_x","sum_value") %>%
+#   dplyr::distinct()
+#%>%
+  # identify inflection points ()
+  #dplyr::mutate(=)
+
+# plot
+truth_periods <- high_truth %>%
+  dplyr::filter(target_variable=="inc death") %>%
+  dplyr::group_by(location) %>%
+  dplyr::mutate(fdate_at_peak=target_end_date_x[which.max(value)]) %>%
+  dplyr::ungroup()
+
+truth_periods$fdate_at_peak[which(truth_periods$location_name=="Florida")] <- "2021-02-13"
+
+peak_date <- dplyr::distinct(truth_periods[,c(2,12)])
+peak_date$location <- as.character(peak_date$location)
+# truth_periods$dstart[which(truth_periods$abbreviation=="CA")] <- '2020-12-05'
+# truth_periods$dend[which(truth_periods$abbreviation=="CA")] <- as.Date('2020-12-05')+28
+# truth_periods$col[which(truth_periods$abbreviation=="CA" && truth_periods$dstart=='2020-12-05')] <- "up"
+
+  # plot
+ggplot(truth_periods)+
+    geom_line(aes(x=as.Date(target_end_date_x),y=value))+
+    geom_vline(aes(xintercept=as.Date(fdate_at_peak)))+
+    #facet_wrap(~horizon, nrow=1,scales = "free") +
+    labs(x = "", y = "Observed inc deaths")+
+    scale_x_date(date_breaks = "1 months",
+                 date_labels = "%b-%y",
+                 # to  really limit the range on the plot
+                 expand = expansion())+
+    facet_wrap(~abbreviation)+
+    # scale_y_continuous(limits = c(0, 8))+
+    theme_bw()+
+    theme(axis.text.x = element_text(angle=-45, hjust=-0.2,size=7),
+          axis.text.y = element_text(size=3))
+```
+
+```{r}
+# general version
+# redo to make it not average over locations
+total_frame_loc <- approx_cd_list[[1]] %>%
+  dplyr::left_join(peak_date,by="location") %>%
+  dplyr::mutate(pair=paste(model_1,model_2,sep=" vs ")) %>%
+  dplyr::group_by(horizon,target_variable,target_end_date,pair,location) %>%
+  dplyr::mutate(mean_approx_cd=mean(approx_cd)) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(-c("approx_cd","fdate_at_peak")) %>%
+  dplyr::distinct()
+total_frame_loc$target_end_date <- as.Date(total_frame_loc$target_end_date,origin="1970-01-01")
+# change total frame
+all_data_loc <- total_frame_loc %>%
+  dplyr::group_by(horizon,target_end_date, location) %>%
+  dplyr::filter(model_1 !=model_2) %>%
+  dplyr:: ungroup() %>%
+  dplyr::distinct(horizon,location,target_end_date,mean_approx_cd,.keep_all = TRUE)
+
+type_dat_loc <- all_data_loc %>%
+  dplyr::left_join(d_types,by=c("model_1"="model_abbr")) %>%
+  dplyr::left_join(d_types,by=c("model_2"="model_abbr")) %>%
+  dplyr::mutate(model1_type=compartmental.x,
+                model2_type=compartmental.y,
+                pair_type=ifelse(model1_type != model2_type,
+                                 "mismatched",
+                                 ifelse(model1_type==TRUE & model2_type==TRUE,
+                                        "both", "neither")))  %>%
+  .[,c(1:8,17)]
+
+
+type_dat_mean_loc <- type_dat_loc %>%
+  dplyr::group_by(horizon,pair,location) %>%
+  dplyr::mutate(mean_cd=mean(mean_approx_cd)) %>%
+  dplyr::ungroup() %>%
+  dplyr::distinct(location,horizon,mean_cd,pair_type,pair,.keep_all=FALSE)
+
+## apply by location
+loc1 <- approx_cd_list[[2]] %>%
+  dplyr::filter(location==c(peak_date$location)[1]) %>%
+  dplyr::select(-"location") 
+d_frame_mean_loc1 <- lapply(1:4, function(x) cd_matrix(loc1,x))
+rm(loc1)
+loc2 <- approx_cd_list[[2]] %>%
+  dplyr::filter(location==c(peak_date$location)[2]) %>%
+  dplyr::select(-"location") 
+d_frame_mean_loc2 <- lapply(1:4, function(x) cd_matrix(loc2,x))
+rm(loc2)
+loc3 <- approx_cd_list[[2]] %>%
+  dplyr::filter(location==c(peak_date$location)[3]) %>%
+  dplyr::select(-"location") 
+d_frame_mean_loc3 <- lapply(1:4, function(x) cd_matrix(loc3,x))
+rm(loc3)
+loc4 <- approx_cd_list[[2]] %>%
+  dplyr::filter(location==c(peak_date$location)[4]) %>%
+  dplyr::select(-"location") 
+d_frame_mean_loc4 <- lapply(1:4, function(x) cd_matrix(loc4,x))
+rm(loc4)
+```
+
+```{r}
+# redo to make it not average over locations
+total_frame_loc_p <- approx_cd_list[[1]] %>%
+  dplyr::left_join(peak_date,by="location") %>%
+  dplyr::filter(as.Date(target_end_date,origin="1970-01-01")==as.Date(fdate_at_peak,origin="1970-01-01")+(7*horizon)) %>% 
+  dplyr::mutate(pair=paste(model_1,model_2,sep=" vs ")) %>%
+  dplyr::group_by(horizon,target_variable,target_end_date,pair,location) %>%
+  dplyr::mutate(mean_approx_cd=mean(approx_cd)) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(-c("approx_cd","fdate_at_peak")) %>%
+  dplyr::distinct()
+total_frame_loc_p$target_end_date <- as.Date(total_frame_loc_p$target_end_date,origin="1970-01-01")
+# change total frame
+all_data_loc_p <- total_frame_loc_p %>%
+  dplyr::group_by(horizon,target_end_date, location) %>%
+  dplyr::filter(model_1 !=model_2) %>%
+  dplyr:: ungroup() %>%
+  dplyr::distinct(horizon,location,target_end_date,mean_approx_cd,.keep_all = TRUE)
+
+type_dat_loc_p <- all_data_loc_p %>%
+  dplyr::left_join(d_types,by=c("model_1"="model_abbr")) %>%
+  dplyr::left_join(d_types,by=c("model_2"="model_abbr")) %>%
+  dplyr::mutate(model1_type=compartmental.x,
+                model2_type=compartmental.y,
+                pair_type=ifelse(model1_type != model2_type,
+                                 "mismatched",
+                                 ifelse(model1_type==TRUE & model2_type==TRUE,
+                                        "both", "neither")))  %>%
+  .[,c(1:8,17)]
+
+
+type_dat_mean_loc_p <- type_dat_loc_p %>%
+  dplyr::group_by(horizon,pair,location) %>%
+  dplyr::mutate(mean_cd=mean(mean_approx_cd)) %>%
+  dplyr::ungroup() %>%
+  dplyr::distinct(location,horizon,mean_cd,pair_type,pair,.keep_all=FALSE)
+
+## apply by location
+loc1_p <- total_frame_loc_p[,-c(6:7)] %>%
+  dplyr::filter(location==c(peak_date$location)[1]) %>%
+  dplyr::mutate(mean_dis=mean_approx_cd) %>%
+  dplyr::select(-c("location","mean_approx_cd")) 
+d_frame_mean_loc1_p <- lapply(1:4, function(x) cd_matrix(loc1_p,x))
+rm(loc1_p)
+loc2_p <- total_frame_loc_p[,-c(6:7)] %>%
+  dplyr::filter(location==c(peak_date$location)[2]) %>%
+  dplyr::mutate(mean_dis=mean_approx_cd) %>%
+  dplyr::select(-c("location","mean_approx_cd")) 
+d_frame_mean_loc2_p <- lapply(1:4, function(x) cd_matrix(loc2_p,x))
+rm(loc2_p)
+loc3_p <- total_frame_loc_p[,-c(6:7)] %>%
+  dplyr::filter(location==c(peak_date$location)[3]) %>%
+  dplyr::mutate(mean_dis=mean_approx_cd) %>%
+  dplyr::select(-c("location","mean_approx_cd")) 
+d_frame_mean_loc3_p <- lapply(1:4, function(x) cd_matrix(loc3_p,x))
+rm(loc3_p)
+loc4_p <- total_frame_loc_p[,-c(6:7)] %>%
+  dplyr::filter(location==c(peak_date$location)[4]) %>%
+  dplyr::mutate(mean_dis=mean_approx_cd) %>%
+  dplyr::select(-c("location","mean_approx_cd"))  
+d_frame_mean_loc4 <- lapply(1:4, function(x) cd_matrix(loc4_p,x))
+rm(loc4_p)
+```
+
+```{r,fig.align='center',fig.height=8,fig.width=6}
+# print heatmapes
+# for(loc in loc_name$location){
+#   print(do.call(get,list(paste0("p_",loc))))
+# }
+catbox_plot4(type_dat_mean_loc,"Approx. CD across time") +
+  facet_wrap(~location,ncol=2)
+catbox_plot4(type_dat_mean_loc_p,"Approx. CD 1-4 ahead from peak week")+
+  facet_wrap(~location,ncol=2)
+
+# l_box<- catbox_plot4(type_dat_meanl,"Low Death Locations")
+# grid.arrange(h_box,l_box,ncol=2)
+#catbox_plot(pair_data_low,"Low Case Count Locations")
+
+#type_bar1 <- 
+
+# type_dat_mean %>%
+#   dplyr::group_by(pair_type, horizon) %>%
+#   dplyr::summarize(mean=mean(mean_cd),sd_2=2*sd(mean_cd)) %>%
+#   dplyr::ungroup() %>%  
+#   ggplot(.,aes(x=as.factor(horizon), y=mean,color=pair_type)) + 
+#   geom_line() +
+#   geom_point()+
+#   geom_errorbar(aes(ymin=mean-sd_2, ymax=mean+sd_2), width=.2,
+#                  position=position_dodge(0.05))
+#grid.arrange(cat1,cat2,ncol=2)
+```
+
+```{r,fig.cap="Location 12 - across time",fig.height=4}
+#for(i in 1:4){
+    # assign(paste0("dpd_",i),
+    #        dendro_plot(i, "d_frame_mean_low",d_types)
+    #          )
+    # assign(paste0("dpl_",i),
+    #        dendro_plot(i, "c_frame_mean_low",short_meta_low)
+    #          )
+    # assign(paste0("dpdl_",i),
+    #        dendro_plot(i, "c_frame_mean_low",short_data_low,FALSE)
+    #          )
+#  } 
+dp_1 <- dendro_plot(1, "d_frame_mean_loc1",d_types, 160)
+dp_2 <- dendro_plot(2, "d_frame_mean_loc1",d_types, 165)
+dp_3 <- dendro_plot(3, "d_frame_mean_loc1",d_types, 180)
+dp_4 <- dendro_plot(4, "d_frame_mean_loc1",d_types, 235)
+            
+grid.arrange(dp_1,dp_2,dp_3,dp_4,nrow=2)
+#grid.arrange(dpd_1,dpd_2,dpd_3,dpd_4,nrow=2)
+
+```
+```{r,fig.cap="Location 12 - 1-4 week from peak week",fig.height=4}
+#for(i in 1:4){
+    # assign(paste0("dpd_",i),
+    #        dendro_plot(i, "d_frame_mean_low",d_types)
+    #          )
+    # assign(paste0("dpl_",i),
+    #        dendro_plot(i, "c_frame_mean_low",short_meta_low)
+    #          )
+    # assign(paste0("dpdl_",i),
+    #        dendro_plot(i, "c_frame_mean_low",short_data_low,FALSE)
+    #          )
+#  } 
+dp_11 <- dendro_plot(1, "d_frame_mean_loc1_p",d_types, 150)
+dp_21 <- dendro_plot(2, "d_frame_mean_loc1_p",d_types, 165)
+dp_31 <- dendro_plot(3, "d_frame_mean_loc1_p",d_types, 180)
+dp_41 <- dendro_plot(4, "d_frame_mean_loc1_p",d_types, 235)
+            
+grid.arrange(dp_11,dp_21,dp_31,dp_41,nrow=2)
+#grid.arrange(dpd_1,dpd_2,dpd_3,dpd_4,nrow=2)
+
+```
+
+### Decomposition
+
+This is a trial run of applying decomposition to the actual forecasts. For now, we show the decomposition of the approx. CD between the COVIDhub-ensemble (Model F) and Karlen-pypm (Model G). 
+
+* Both dispersion components seem to play little role in dissimilarity
+* Comparing between forecasts for locations with high deaths vs ones with low deaths, the proportions of decomposition components look about the same, with the upward shift of G relative to F accounting for most of the dissimilarity on average
+* Around Feb 2021 until the end of April 2021, we see the upward shift of F relative to G accounting for most of the dissimilarity during that period. This coincides with the downward slope of observed inc deaths after the peak. More inspection needed to discern more information. 
+
+```{r, cache=TRUE}
+
+# compare karlen-pypm vs ensemble
+decom_list_h_p <- d_frame %>%
+  dplyr::mutate(location=as.character(location)) %>%
+  dplyr::left_join(peak_date, by="location") %>%
+  dplyr::filter(location %in% c(peak_date$location),
+                as.Date(target_end_date,origin="1970-01-01")==as.Date(fdate_at_peak,origin="1970-01-01")) %>%
+  dplyr::select(-"fdate_at_peak") %>%
+  decomp_wrapper(., 
+                 horizon_list=c(1:4),
+                 target_list="inc death")
+# decom_list_l <- decomp_wrapper(d_frame1, 
+#                              horizon_list=c(1:4),
+#                              target_list="inc death")
+decom_list_h <- d_frame %>%
+  dplyr::mutate(location=as.character(location)) %>%
+  dplyr::left_join(peak_date, by="location") %>%
+  dplyr::filter(location %in% c(peak_date$location)) %>%
+  dplyr::select(-"fdate_at_peak") %>%
+  decomp_wrapper(., 
+                 horizon_list=c(1:4),
+                 target_list="inc death")
+```
+
+
+```{r decomp,fig.align='center',out.width='95%',out.height='50%'}
+
+dplot1 <-stack_plot(decom_list_h[[1]], "COVIDhub-ensemble", "Karlen-pypm", by_date=TRUE)
+dplot2 <- stack_plot(decom_list_h[[3]], "COVIDhub-ensemble", "Karlen-pypm", by_date=FALSE)
+dplot3 <-stack_plot(decom_list_h[[1]], "COVIDhub-baseline", "Karlen-pypm", by_date=TRUE)
+dplot4 <- stack_plot(decom_list_h[[3]], "COVIDhub-baseline", "Karlen-pypm", by_date=FALSE)
+# dplot3 <-stack_plot(decom_list_l[[1]], "COVIDhub-ensemble", "Karlen-pypm", by_date=TRUE)
+# dplot4 <- stack_plot(decom_list_l[[3]], "COVIDhub-ensemble", "Karlen-pypm", by_date=FALSE)
+grid.arrange(dplot1,dplot2,ncol=2,bottom="Decomposition of approx. CD between COVIDhub-ensemble and Karlen-pypm\n - CA, FL, NY, PA, TX")
+grid.arrange(dplot3,dplot4,ncol=2,bottom="Decomposition of approx. CD between COVIDhub-baseline and Karlen-pypm\n - CA, FL, NY, PA, TX")
+# grid.arrange(dplot3,dplot4,ncol=2,bottom="Decomposition of approx. CD between COVIDhub-ensemble and Karlen-pypm\n - AK, HI, ME, VT, WY")
+```
+
+```{r decomp_p,fig.align='center',out.width='95%',out.height='50%'}
+
+dplot2 <- stack_plot(decom_list_h_p[[3]], "COVIDhub-ensemble", "Karlen-pypm", by_date=FALSE)
+dplot4 <- stack_plot(decom_list_h_p[[3]], "COVIDhub-baseline", "Karlen-pypm", by_date=FALSE)
+# dplot3 <-stack_plot(decom_list_l[[1]], "COVIDhub-ensemble", "Karlen-pypm", by_date=TRUE)
+# dplot4 <- stack_plot(decom_list_l[[3]], "COVIDhub-ensemble", "Karlen-pypm", by_date=FALSE)
+
+grid.arrange(dplot2,dplot4,ncol=2,bottom="Decomposition of approx. CD between COVIDhub-ensemble and Karlen-pypm (left)\n and COVIDhub-baseline and Karlen-pypm (right) - CA, FL, NY, PA, TX")
+# grid.arrange(dplot3,dplot4,ncol=2,bottom="Decomposition of approx. CD between COVIDhub-ensemble and Karlen-pypm\n - AK, HI, ME, VT, WY")
+```
+
+
+### Consistancy (Dissimilarity and COVID-19 characteristics)
+
+Consistency of forecast sequences (forecasts from the same model at different horizons made for the same  target end date) using the divergence index (based on cramer distance) proposed by Richarson et al. (2020)
+
+```{r}
+```
+
+
+<!-- ### Permutation test -->
+
+<!-- Categorize forecasting models into two groups: 1) Mechanistic 2) Non-mechanistic. Define the ratio of the mean approx. Cramer's distance between two forecasts from mechanistic models and from a mechanistic model and another type of model as  -->
+
+<!-- $$ -->
+<!-- R_{\text{cd}} = \frac{\text{CD}_{\text{mechanistic}}}{\text{CD}_{\text{mismatched}}}. -->
+<!-- $$ -->
+
+<!-- We expect $R_{cd}\approx1$ if there is no difference in divergence between mechanistic models and mechanistic vs other models. The distribution of the  $R_{\text{cd}}$ is unknown under the null hypothesis of no model type difference. Nutcha's notes: Maybe we can think about mean CDmismatched - CD mechanistic >0? Or maybe test that the ratio is different from 1? -->
+
+<!-- $$ -->
+<!-- T_2 = \text{CD}_{\text{mismatched}}-\text{CD}_{\text{mechanistic}}. -->
+<!-- $$ -->
+<!-- The p-value of the $T_1$ test is -->
+
+<!-- $$ -->
+<!-- \text{P value} = \frac{\# \{T_2^{\text{permuted}}>T_2\}}{\# \text{ of permutations}}. -->
+<!-- $$ -->
+
+<!-- The p-value of the $T_2$ test is -->
+
+<!-- \begin{equation} -->
+<!-- \text{P value} = \frac{\#\{R_{\text{cd}}^\text{permuted}>R_{\text{cd}}\}}{\# \text{ of permutations}}. -->
+<!-- \end{equation} -->
+
+<!-- The number of possible permutations of model type labels depend on how we categorize types. Using the category mechanistic vs non-mechanistic, we define $N$ as the total number of models and $N_1$ as the number of mechanistic models. Thus, we have $N-N_1$ non-mechanistic models. The number of label permutations can be calculated as follows: -->
+
+<!-- \begin{equation} -->
+<!-- L = \frac{N!}{N_1!(N-N_1)!}. -->
+<!-- \end{equation} -->
+
+<!-- In this application, $L=126$ (did I take out the ensemble here?). The issue we have to consider is whether we should average CD over time or deal with them as repeated measures (same with horizons). For now, we test separate horizons. We permute labels within the same locations and forecast dates and targets to keep the dependency structure consistent. -->
+
+<!-- ```{r} -->
+<!-- pdat <- approx_cd_list[[1]] %>% -->
+<!--   dplyr::group_by(horizon,target_end_date,location) %>% -->
+<!--   dplyr::filter(model_1 !=model_2) %>% -->
+<!--   dplyr:: ungroup() %>% -->
+<!--   dplyr::distinct(horizon,target_end_date,approx_cd,location,.keep_all = TRUE)%>% -->
+<!--   dplyr::left_join(d_types,by=c("model_1"="model_abbr")) %>% -->
+<!--   dplyr::left_join(d_types,by=c("model_2"="model_abbr")) %>% -->
+<!--   dplyr::mutate(model1_type=compartmental.x, -->
+<!--                 model2_type=compartmental.y, -->
+<!--                 pair_type=ifelse(model1_type != model2_type, -->
+<!--                                  "mismatched", -->
+<!--                                  ifelse(model1_type==TRUE & model2_type==TRUE, -->
+<!--                                         "both", "neither"))) %>% -->
+<!--   .[,c(1:7,16)] -->
+<!-- pdat_low <- approx_cd_list_low[[1]] %>% -->
+<!--   dplyr::group_by(horizon,target_end_date,location) %>% -->
+<!--   dplyr::filter(model_1 !=model_2) %>% -->
+<!--   dplyr:: ungroup() %>% -->
+<!--   dplyr::distinct(horizon,target_end_date,approx_cd,location,.keep_all = TRUE) %>% -->
+<!--   dplyr::left_join(d_types,by=c("model_1"="model_abbr")) %>% -->
+<!--   dplyr::left_join(d_types,by=c("model_2"="model_abbr")) %>% -->
+<!--   dplyr::mutate(model1_type=compartmental.x, -->
+<!--                 model2_type=compartmental.y, -->
+<!--                 pair_type=ifelse(model1_type != model2_type, -->
+<!--                                  "mismatched", -->
+<!--                                  ifelse(model1_type==TRUE & model2_type==TRUE, -->
+<!--                                         "both", "neither"))) %>% -->
+<!--   .[,c(1:7,16)] -->
+
+<!-- pdat_low$target_end_date <- as.Date(pdat_low$target_end_date,origin="1970-01-01") -->
+<!-- pdat$target_end_date <- as.Date(pdat$target_end_date,origin="1970-01-01") -->
+
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- # for high count only for now -->
+<!-- set.seed(1234) -->
+<!-- # not sure how big L is actually, this might not be an appropriate B -->
+<!-- B <- 2000 -->
+<!-- # get original ratio  -->
+<!-- p1_data <- pdat %>% -->
+<!--     dplyr::filter(horizon==1) -->
+<!-- p2_data <- pdat %>% -->
+<!--     dplyr::filter(horizon==2) -->
+<!-- p3_data <- pdat %>% -->
+<!--     dplyr::filter(horizon==3) -->
+<!-- p4_data <- pdat %>% -->
+<!--     dplyr::filter(horizon==4) -->
+<!-- r_orig <- c(mean(p1_data$approx_cd[p1_data$pair_type=='both'])/mean(p1_data$approx_cd[p1_data$pair_type=='mismatched']), -->
+<!--             mean(p2_data$approx_cd[p2_data$pair_type=='both'])/mean(p2_data$approx_cd[p2_data$pair_type=='mismatched']), -->
+<!--             mean(p3_data$approx_cd[p3_data$pair_type=='both'])/mean(p3_data$approx_cd[p3_data$pair_type=='mismatched']), -->
+<!--             mean(p4_data$approx_cd[p4_data$pair_type=='both'])/mean(p4_data$approx_cd[p4_data$pair_type=='mismatched'])) -->
+<!-- # data -->
+<!-- r_vec <- matrix(rep(NA,B*4),ncol=4) -->
+<!-- for(i in 1:4){ -->
+<!--   for(j in 1:B){ -->
+<!--       r_vec[j,i] <- perm_test(pdat,i) -->
+<!--   } -->
+<!-- } -->
+<!-- # cal p value -->
+<!-- pval_1 <- sum(r_vec[,1]>=r_orig[1])/B -->
+<!-- pval_2 <- sum(r_vec[,2]>=r_orig[2])/B -->
+<!-- pval_3 <- sum(r_vec[,3]>=r_orig[3])/B -->
+<!-- pval_4 <- sum(r_vec[,4]>=r_orig[4])/B -->
+
+<!-- # plot -->
+<!-- hist(r_vec[,1], breaks=20, col='grey', main="Permutation Distribution", las=1, xlab='',xlim=c(0.5,1.5)) -->
+<!-- abline(v=r_orig[1], lwd=3, col="red") -->
+
+<!-- pval_1 -->
+
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- # for high count only for now -->
+<!-- set.seed(1234) -->
+<!-- r_orig2 <- c(mean(p1_data$approx_cd[p1_data$pair_type=='mismatched'])-mean(p1_data$approx_cd[p1_data$pair_type=='both']), -->
+<!--             mean(p2_data$approx_cd[p2_data$pair_type=='mismatched'])-mean(p2_data$approx_cd[p2_data$pair_type=='both']), -->
+<!--             mean(p3_data$approx_cd[p3_data$pair_type=='mismatched'])-mean(p3_data$approx_cd[p3_data$pair_type=='both']), -->
+<!--             mean(p4_data$approx_cd[p4_data$pair_type=='mismatched'])-mean(p4_data$approx_cd[p4_data$pair_type=='both'])) -->
+<!-- # data -->
+<!-- r_vec2 <- matrix(rep(NA,B*4),ncol=4) -->
+<!-- for(i in 1:4){ -->
+<!--   for(j in 1:B){ -->
+<!--       r_vec2[j,i] <- perm_test(pdat,i,test_type = FALSE) -->
+<!--   } -->
+<!-- } -->
+<!-- # cal p value -->
+<!-- pval2_1 <- sum(r_vec2[,1]>=r_orig2[1])/B -->
+<!-- pval2_2 <- sum(r_vec2[,2]>=r_orig2[2])/B -->
+<!-- pval2_3 <- sum(r_vec2[,3]>=r_orig2[3])/B -->
+<!-- pval2_4 <- sum(r_vec2[,4]>=r_orig2[4])/B -->
+
+<!-- # plot -->
+<!-- hist(r_vec2[,1], breaks=20, col='grey', main="Permutation Distribution", las=1, xlab='',xlim=c(-15,15)) -->
+<!-- abline(v=r_orig2[1], lwd=3, col="red") -->
+<!-- ``` -->
+<!-- We see similar trend here as we saw in inc death analysis. -->
+
+<!-- ```{r,fig.align='center'} -->
+
+<!-- scores %>% -->
+<!--   dplyr::filter(model %in% short_meta$model_abbr) %>% -->
+<!--   dplyr::group_by(model, horizon) %>% -->
+<!--   dplyr::summarise(wis = mean(wis)) %>% -->
+<!--   scoringutils::score_heatmap(metric = "wis", x = "horizon") -->
+<!-- ``` -->
+<!-- ```{r,fig.cap="Low Case Count Locations",fig.height=4} -->
+<!-- grid.arrange(dpl_1,dpl_2,dpl_3,dpl_4,nrow=2) -->
+<!-- ``` -->
+
+<!-- Funny enough, all results seem to point out that mechanistic models are more dissimilar to one another than to the other model types. -->

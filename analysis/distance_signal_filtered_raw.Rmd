@@ -1,0 +1,504 @@
+---
+title: "Distance as a signal"
+author: "Nutcha Wattanachit, Johannes Bracher, Evan Ray, Nick Reich"
+date: "09/26/2022"
+header-includes:
+   - \usepackage{tabularx}
+   - \usepackage{hyperref}
+   - \usepackage{wrapfig}
+   - \usepackage{float}
+   - \usepackage{colortbl}
+   - \usepackage{pdflscape}
+   - \usepackage{tabu}
+   - \usepackage{xcolor}
+output:
+  pdf_document:
+        latex_engine: xelatex
+        fig_caption: yes
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(energy)
+library(knitr)
+library(data.table)
+library(covidHubUtils)
+library(RColorBrewer)
+library(genlasso)
+library(tseries)
+#devtools::install_github("reichlab/covidHubUtils",force=TRUE)
+library(epiprocess)
+#devtools::install_github("cmu-delphi/epiprocess",force=TRUE)
+library(lubridate)
+library(zoltr)
+library(igraph)
+library(gtools)
+library(gtable)
+library(gridExtra)
+library(grid)
+library(ggdendro)
+library(astsa)
+library(gridGraphics)
+knitr::opts_chunk$set(echo=FALSE, comment = FALSE, message=FALSE, 
+                      fig.show= 'hold',fig.pos="H",table.placement="H",
+                      warning =FALSE)
+```
+
+## Cross-correlations
+
+### Forecast inclusion criteria
+
+* Targets: 2 and 4 wk ahead inc death
+* Target End Dates: Jan 2021-Jan 2022
+* Model: all models submitted on a particular date
+* Probability levels: All
+* Locations: All 34 states (continental US) except HI, AK and DC. We also exclude DE, ME,MT,OK,OR,VT for low or highly variable incidents. We also exclude AZ, CA, CT, MD, MO, NE, NJ, RI since they have only one peak. 
+
+<!-- NW to inspect each date sets and throw out some locations that don't look good or adjusting the date sets themselves -->
+<!-- should consider getting rid of the down period since behavior are much different from before when the peak is observed (quick turn around for model compared to pre-peak) , plus date is too short-->
+
+```{r,cache=TRUE}
+# source function
+source("./functions/distance_func_script.R")
+source("./functions/plot_func.R")
+# set location and targets
+melocs <- read.csv("./data/locations.csv")
+locs <- melocs$location[1:52]
+target_horizon1 <- c(2,4)
+target_var <- c("inc death")
+
+# read distances
+dist_gen_norepeat <- read.csv("./data/analysis_data/norepeat_distance_all_l.csv") %>%
+  dplyr::mutate(target_end_date = as.Date(target_end_date),
+                location = ifelse(nchar(location)==3,paste0("0",as.numeric(location)),location)
+                ) 
+# truth
+truth_death <- read.csv("./data/truth_prefiltered.csv") %>%
+  dplyr::mutate(value=ifelse(value<0,0,value),
+                target_end_date = as.Date(target_end_date)) %>%
+  dplyr::filter(geo_type=="state",
+                location %in% locs) %>%
+  dplyr::filter(target_variable=="inc death") %>%
+  dplyr::filter(target_end_date <= max(dist_gen_norepeat$target_end_date),
+                target_end_date >=  min(dist_gen_norepeat$target_end_date)) 
+scale_full <- dist_gen_norepeat %>%
+  dplyr::mutate(date = (as.Date(target_end_date)+2)-(7*horizon),
+                location=as.character(location),
+                horizon=as.character(horizon)) %>%
+  dplyr::filter(horizon %in% target_horizon1,
+                date >= "2020-04-01",
+                target_end_date <= "2022-01-31") %>%
+  dplyr::group_by(date,location) %>%
+  dplyr::filter(n_distinct(horizon)==2) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(approx_cd,horizon,location,date)
+# add truth death
+truth_death_hr <- truth_death  %>%
+  dplyr::mutate(approx_cd=value,
+                date=target_end_date+2,
+                horizon="incident death") %>%
+  dplyr::filter(target_end_date >= "2020-04-01",
+                target_end_date <= "2022-01-31") %>%
+  dplyr::select(location,date,approx_cd,horizon)
+truth_death_hr <- truth_death_hr[,c(3,4,1,2)]
+```
+
+
+```{r, cache=TRUE}
+# SHARED DATA FOR BOTH DATES
+# selected location without adjustment
+# consider excluding
+excl <- c(26,36,37,8,45,19)
+excl2 <- c(3,5,7,20,25,27,30,39) # places with 1 peak
+all_locs <- unique(scale_full$location)[-c(2,51,11,excl,excl2)] 
+# build combined data
+x <-rbind(truth_death_hr %>%
+          dplyr::filter(horizon=="incident death",
+                        location %in% all_locs) %>% 
+          dplyr::mutate(horizon="truth",type="truth"),
+          scale_full %>%
+          dplyr::filter(location %in% all_locs) %>%
+          dplyr::group_by(horizon,location,date) %>%
+            # change from mean to median
+          dplyr::mutate(approx_cd=median(approx_cd),type="median CD") %>%
+          dplyr::ungroup() %>%
+          distinct()
+          ) %>%
+    dplyr::mutate(adjusted_value=ifelse(horizon=="truth" & approx_cd==0,1,approx_cd),
+                log_adjvalue=log(adjusted_value)) %>%
+  dplyr::group_by(location,date) %>%
+  dplyr::filter(n_distinct(horizon)==3) %>%
+  dplyr::ungroup() %>%
+  pivot_longer(cols = c("approx_cd"),
+               names_to = c("Method"),
+               values_to = "value") %>%
+  dplyr::mutate(unit=ifelse(Method=="approx_cd","count","proc_value"))
+# # all plots
+# x <- x0
+```
+
+```{r}
+## build plot data fir up period
+# make sure we have enough date for positive lags
+n_wks <- 9
+# truth date1 
+truth_dates1 <- x %>%
+  dplyr::filter(date < "2021-04-10",
+                date > "2020-10-15",
+                horizon=="truth",
+                unit=="count") %>%
+  dplyr::group_by(location) %>%
+  dplyr::mutate(peak_date = date[which.max(value)],
+                last_date = peak_date+(n_wks*7),
+                start_date = peak_date - (n_wks*7),
+                first_lag_date=start_date-(n_wks*7)) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(location,peak_date,last_date,start_date,first_lag_date) %>%
+  distinct()
+
+## data for ccf
+# recalc ccf for peak mid year
+## make data set
+xt1 <- x %>%
+  dplyr::left_join(truth_dates1, by=c("location"))  %>%
+  dplyr::filter(unit=="count",
+                type=="median CD",
+                horizon %in% c(2,4)) %>%
+  dplyr::filter(date <= last_date,
+                date >= first_lag_date)
+y1 <- x %>%
+  dplyr::left_join(truth_dates1, by=c("location"))%>%
+  dplyr::filter(unit=="count",
+                type=="truth",
+                date <= last_date,
+                date >= first_lag_date) %>%
+  dplyr::select(-"horizon") %>%
+  dplyr::distinct()
+
+# truth date2 
+truth_dates <- x %>%
+  dplyr::filter(date > "2021-07-01",
+                date < "2021-11-01",
+                horizon=="truth",
+                unit=="count") %>%
+  dplyr::group_by(location) %>%
+  dplyr::mutate(peak_date = date[which.max(value)],
+                last_date = peak_date+(n_wks*7),
+                start_date = peak_date - (n_wks*7),
+                first_lag_date=start_date-(n_wks*7)) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(location,peak_date,last_date,start_date,first_lag_date) %>%
+  distinct()
+
+## data for ccf
+# recalc ccf for peak mid year
+## make data set
+xt <- x %>%
+  dplyr::left_join(truth_dates, by=c("location"))  %>%
+  dplyr::filter(unit=="count",
+                type=="median CD",
+                horizon %in% c(2,4)) %>%
+  dplyr::filter(date <= last_date,
+                date >= first_lag_date)
+y <- x %>%
+  dplyr::left_join(truth_dates, by=c("location"))%>%
+  dplyr::filter(unit=="count",
+                type=="truth",
+                date <= last_date,
+                date >= first_lag_date) %>%
+  dplyr::select(-"horizon") %>%
+  dplyr::distinct()
+
+# adf.test(xt %>% dplyr::filter(location=="06",horizon==4) %>% dplyr::select(value) %>% ts(.))
+## calculation and plot
+ccf_list1_ex <- ccf_list2_ex <- ccf_list3_ex <- ccf_list4_ex <- 
+  ccf_list1 <- ccf_list2 <- ccf_list3 <- ccf_list4 <- list()
+```
+
+<!-- ```{r} -->
+<!-- ## build plot data for down -->
+<!-- # truth date1  -->
+<!-- truth_dates1d <- x %>% -->
+<!--   dplyr::filter(date < "2021-04-10", -->
+<!--                 date > "2020-10-15", -->
+<!--                 horizon=="truth", -->
+<!--                 unit=="count") %>% -->
+<!--   dplyr::group_by(location) %>% -->
+<!--   dplyr::mutate(peak_date = date[which.max(value)], -->
+<!--                 start_date = peak_date+7, -->
+<!--                 last_date = start_date+(n_wks*7), -->
+<!--                 last_lead_date=last_date+(n_wks*7), -->
+<!--                 first_lag_date=start_date-(n_wks*7)) %>% -->
+<!--   dplyr::ungroup() %>% -->
+<!--   dplyr::select(location,peak_date,last_date,start_date,first_lag_date,last_lead_date) %>% -->
+<!--   distinct() -->
+
+<!-- ## make data set -->
+<!-- xt1d <- x %>% -->
+<!--   dplyr::left_join(truth_dates1d, by=c("location"))  %>% -->
+<!--   dplyr::filter(unit=="count", -->
+<!--                 type=="median CD", -->
+<!--                 horizon %in% c(2,4)) %>% -->
+<!--   dplyr::filter(date <= last_lead_date, -->
+<!--                 date >= first_lag_date) -->
+<!-- y1d <- x %>% -->
+<!--   dplyr::left_join(truth_dates1d, by=c("location"))%>% -->
+<!--   dplyr::filter(unit=="count", -->
+<!--                 type=="truth", -->
+<!--                 date <= last_lead_date, -->
+<!--                 date >= first_lag_date) %>% -->
+<!--   dplyr::select(-"horizon") %>% -->
+<!--   dplyr::distinct() -->
+
+<!-- # truth date2  -->
+<!-- truth_datesd <- x %>% -->
+<!--   dplyr::filter(date > "2021-07-01", -->
+<!--                 date < "2021-11-01", -->
+<!--                 horizon=="truth", -->
+<!--                 unit=="count") %>% -->
+<!--   dplyr::group_by(location) %>% -->
+<!--   dplyr::mutate(peak_date = date[which.max(value)], -->
+<!--                 start_date = peak_date+7, -->
+<!--                 last_date = start_date+(n_wks*7), -->
+<!--                 last_lead_date=last_date+(n_wks*7), -->
+<!--                 first_lag_date=start_date-(n_wks*7)) %>% -->
+<!--   dplyr::ungroup() %>% -->
+<!--   dplyr::select(location,peak_date,last_date,start_date,first_lag_date,last_lead_date) %>% -->
+<!--   distinct() -->
+
+<!-- ## data for ccf -->
+<!-- # recalc ccf for peak mid year -->
+<!-- ## make data set -->
+<!-- xtd <- x %>% -->
+<!--   dplyr::left_join(truth_datesd, by=c("location"))  %>% -->
+<!--   dplyr::filter(unit=="count", -->
+<!--                 type=="median CD", -->
+<!--                 horizon %in% c(2,4)) %>% -->
+<!--   dplyr::filter(date <= last_lead_date, -->
+<!--                 date >= first_lag_date) -->
+<!-- yd <- x %>% -->
+<!--   dplyr::left_join(truth_datesd, by=c("location"))%>% -->
+<!--   dplyr::filter(unit=="count", -->
+<!--                 type=="truth", -->
+<!--                 date <= last_lead_date, -->
+<!--                 date >= first_lag_date) %>% -->
+<!--   dplyr::select(-"horizon") %>% -->
+<!--   dplyr::distinct() -->
+
+<!-- # for down period -->
+<!-- ccf_list1_exd <- ccf_list2_exd <- ccf_list3_exd <- ccf_list4_exd <-  -->
+<!--   ccf_list1d <- ccf_list2d <- ccf_list3d <- ccf_list4d <- list() -->
+<!-- ``` -->
+
+
+## Winter 2020/21 Up
+
+```{r}
+for(j in 1:length(all_locs)){
+  loc <- c(all_locs)[j]
+  p1 <- x %>%
+    dplyr::left_join(truth_dates1, by=c("location"))  %>%
+    dplyr::filter(location == loc, 
+                  horizon %in% c(2,4,"truth"),
+                  unit=="count") %>%
+    ggplot() +
+    geom_line(aes(x = as.Date(date), y = value,col=horizon),na.rm = TRUE) +
+    scale_color_brewer(palette = "Dark2") +
+    facet_grid(type~location, scales = "free_y") +
+    geom_rect(aes(xmin=start_date,xmax=peak_date, ymin=-Inf,ymax=Inf),fill="lightblue",alpha=0.05)+
+    scale_x_date(minor_breaks = "1 month", 
+                 breaks = "2 months", 
+                 date_labels = "%b %y") +
+    labs(x = "Date", y = "value") +
+    theme(legend.position = "bottom",
+          legend.key.size = unit(0.5, 'cm'), #change legend key size
+          legend.title = element_text(size=8), #change legend title font size
+          legend.text = element_text(size=5))
+  print(p1)
+  # CCF functino
+  # plot ccf
+  yt1 <- y1 %>%
+    dplyr::filter(location==loc) %>%
+    dplyr::arrange(date) %>%
+    dplyr::select(value)  %>%
+    ts(.)
+  for(i in c(2,4)){
+  assign(paste0("dis1_",i),
+           xt1 %>%
+              dplyr::filter(location==loc,
+                            horizon==i) %>%
+              dplyr::arrange(date) %>%
+              dplyr::select(value) %>%
+              ts(.)
+           )
+  }
+
+  ccf_list2_ex[[j]] <- ccf(dis1_2[,1], yt1[,1],lag.max=n_wks,plot = FALSE)
+  ccf_list4_ex[[j]] <- ccf(dis1_4[,1], yt1[,1],lag.max=n_wks,plot = FALSE)
+  # # check
+ plot(ccf_list2_ex[[j]], main = paste0("2 wk ahead - ",loc))
+ plot(ccf_list4_ex[[j]], main = paste0("4 wk ahead - ",loc))
+}
+```
+
+<!-- ## Winter 2020/21 down -->
+
+<!-- ```{r} -->
+<!-- for(j in 1:length(all_locs)){ -->
+<!--   loc <- c(all_locs)[j] -->
+<!--   p1 <- x %>% -->
+<!--     dplyr::left_join(truth_dates1d, by=c("location"))  %>% -->
+<!--     dplyr::filter(location == loc,  -->
+<!--                   horizon %in% c(2,4,"truth"), -->
+<!--                   unit=="count") %>% -->
+<!--     ggplot() + -->
+<!--     geom_line(aes(x = as.Date(date), y = value,col=horizon),na.rm = TRUE) + -->
+<!--     scale_color_brewer(palette = "Dark2") + -->
+<!--     facet_grid(type~location, scales = "free_y") + -->
+<!--     geom_rect(aes(xmin=start_date,xmax=last_date, ymin=-Inf,ymax=Inf),fill="lightblue",alpha=0.05)+ -->
+<!--     scale_x_date(minor_breaks = "1 month",  -->
+<!--                  breaks = "2 months",  -->
+<!--                  date_labels = "%b %y") + -->
+<!--     labs(x = "Date", y = "value") + -->
+<!--     theme(legend.position = "bottom", -->
+<!--           legend.key.size = unit(0.5, 'cm'), #change legend key size -->
+<!--           legend.title = element_text(size=8), #change legend title font size -->
+<!--           legend.text = element_text(size=5)) -->
+<!--   print(p1) -->
+<!--   # CCF functino -->
+<!--   # plot ccf -->
+<!--   yt1d <- y1d %>% -->
+<!--     dplyr::filter(location==loc) %>% -->
+<!--     dplyr::arrange(date) %>% -->
+<!--     dplyr::select(value)  %>% -->
+<!--     ts(.) -->
+<!--   for(i in c(2,4)){ -->
+<!--   assign(paste0("dis1d_",i), -->
+<!--            xt1d %>% -->
+<!--               dplyr::filter(location==loc, -->
+<!--                             horizon==i) %>% -->
+<!--               dplyr::arrange(date) %>% -->
+<!--               dplyr::select(value) %>% -->
+<!--               ts(.) -->
+<!--            ) -->
+<!--   } -->
+
+<!--   ccf_list2_exd[[j]] <- ccf(dis1d_2[,1], yt1d[,1],lag.max=n_wks,plot = FALSE) -->
+<!--   ccf_list4_exd[[j]] <- ccf(dis1d_4[,1], yt1d[,1],lag.max=n_wks,plot = FALSE) -->
+<!--   # # check -->
+<!--  plot(ccf_list2_exd[[j]], main = paste0("2 wk ahead - ",loc)) -->
+<!--  plot(ccf_list4_exd[[j]], main = paste0("4 wk ahead - ",loc)) -->
+<!-- } -->
+<!-- ``` -->
+
+
+# Summer/Fall 2021 Up
+
+```{r}
+for(j in 1:length(c(all_locs))){
+  loc <- c(all_locs)[j]
+  p2 <- x %>%
+    dplyr::left_join(truth_dates, by=c("location"))  %>%
+    dplyr::filter(location == loc, 
+                  horizon %in% c(2,4,"truth"),
+                  unit=="count") %>%
+    ggplot() +
+    geom_line(aes(x = as.Date(date), y = value,col=horizon),na.rm = TRUE) +
+    scale_color_brewer(palette = "Dark2") +
+    # fix hospital names below
+    facet_grid(type~location, scales = "free_y", labeller = as_labeller(hospital_names)) +
+    geom_rect(aes(xmin=start_date,xmax=peak_date, ymin=-Inf,ymax=Inf),fill="lightblue",alpha=0.05)+
+    # geom_rect(aes(xmin=start_date1,xmax=peak_date1, ymin=-Inf,ymax=Inf),fill="lightblue",alpha=0.05)+
+    scale_x_date(minor_breaks = "1 month", 
+                 breaks = "2 months", 
+                 date_labels = "%b %y") +
+    labs(x = "Date", y = "value") +
+    theme_bw() +
+    theme(legend.position = "bottom",
+          legend.key.size = unit(0.5, 'cm'), #change legend key size
+          legend.title = element_text(size=8), #change legend title font size
+          legend.text = element_text(size=5))
+    print(p2)
+  # CCF functino
+  # plot ccf
+  yt <- y %>%
+    dplyr::filter(location==loc) %>%
+    dplyr::arrange(date) %>%
+    dplyr::select(value) %>%
+    ts(.)
+  for(i in c(2,4)){
+  assign(paste0("dis_",i),
+           xt %>%
+              dplyr::filter(location==loc,
+                            horizon==i) %>%
+              dplyr::arrange(date) %>%
+              dplyr::select(value) %>%
+              ts(.)
+           )
+  # # ccf
+  }
+  # lag2.plot(dis_4[,1], yt[,1], 5)[1]
+  ccf_list2[[j]] <- ccf(dis_2[,1], yt[,1],lag.max=n_wks,plot =FALSE)
+  ccf_list4[[j]] <- ccf(dis_4[,1], yt[,1],lag.max=n_wks,plot =FALSE)
+  plot(ccf_list2[[j]], main = paste0("2 wk ahead - ",loc))
+  plot(ccf_list4[[j]], main = paste0("4 wk ahead - ",loc))
+}
+```
+
+<!-- # Summer/Fall 2021 Down -->
+
+<!-- ```{r} -->
+<!-- for(j in 1:length(c(all_locs))){ -->
+<!--   loc <- c(all_locs)[j] -->
+<!--   p2 <- x %>% -->
+<!--     dplyr::left_join(truth_datesd, by=c("location"))  %>% -->
+<!--     dplyr::filter(location == loc,  -->
+<!--                   horizon %in% c(2,4,"truth"), -->
+<!--                   unit=="count") %>% -->
+<!--     ggplot() + -->
+<!--     geom_line(aes(x = as.Date(date), y = value,col=horizon),na.rm = TRUE) + -->
+<!--     scale_color_brewer(palette = "Dark2") + -->
+<!--     facet_grid(type~location, scales = "free_y") + -->
+<!--     geom_rect(aes(xmin=start_date,xmax=last_date, ymin=-Inf,ymax=Inf),fill="lightblue",alpha=0.05)+ -->
+<!--     scale_x_date(minor_breaks = "1 month",  -->
+<!--                  breaks = "2 months",  -->
+<!--                  date_labels = "%b %y") + -->
+<!--     labs(x = "Date", y = "value") + -->
+<!--     theme(legend.position = "bottom", -->
+<!--           legend.key.size = unit(0.5, 'cm'), #change legend key size -->
+<!--           legend.title = element_text(size=8), #change legend title font size -->
+<!--           legend.text = element_text(size=5)) -->
+<!--     print(p2) -->
+<!--   # CCF functino -->
+<!--   # plot ccf -->
+<!--   ytd <- yd %>% -->
+<!--     dplyr::filter(location==loc) %>% -->
+<!--     dplyr::arrange(date) %>% -->
+<!--     dplyr::select(value) %>% -->
+<!--     ts(.) -->
+<!--   for(i in c(2,4)){ -->
+<!--   assign(paste0("disd_",i), -->
+<!--            xtd %>% -->
+<!--               dplyr::filter(location==loc, -->
+<!--                             horizon==i) %>% -->
+<!--               dplyr::arrange(date) %>% -->
+<!--               dplyr::select(value) %>% -->
+<!--               ts(.) -->
+<!--            ) -->
+<!--   # # ccf -->
+<!--   } -->
+<!--   # lag2.plot(dis_4[,1], yt[,1], 5)[1] -->
+<!--   ccf_list2d[[j]] <- ccf(disd_2[,1], ytd[,1],plot =FALSE) -->
+<!--   ccf_list4d[[j]] <- ccf(disd_4[,1], ytd[,1],plot =FALSE) -->
+<!--   plot(ccf_list2d[[j]], main = paste0("2 wk ahead - ",loc)) -->
+<!--   plot(ccf_list4d[[j]], main = paste0("4 wk ahead - ",loc)) -->
+<!-- } -->
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- rm(list = setdiff(ls(), c("ccf_list2","ccf_list4","ccf_list2_ex","ccf_list4_ex", -->
+<!--                           # "ccf_list1","ccf_list3","ccf_list1_ex","ccf_list3_ex", -->
+<!--                           "all_locs"))) -->
+<!-- rm(list=lsf.str()) -->
+<!-- ``` -->

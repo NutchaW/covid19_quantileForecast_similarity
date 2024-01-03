@@ -1,0 +1,245 @@
+---
+title: "Multivarate Permuation Analysis"
+author: "Nutcha Wattanachit, Johannes Bracher, Evan Ray, Nick Reich"
+date: "10/25/2022"
+header-includes:
+   - \usepackage{tabularx}
+   - \usepackage{hyperref}
+   - \usepackage{wrapfig}
+   - \usepackage{float}
+   - \usepackage{colortbl}
+   - \usepackage{pdflscape}
+   - \usepackage{tabu}
+   - \usepackage{xcolor}
+output:
+  pdf_document:
+        latex_engine: xelatex
+        fig_caption: yes
+        keep_tex: true 
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(energy)
+library(knitr)
+library(data.table)
+library(covidHubUtils)
+library(RColorBrewer)
+#devtools::install_github("reichlab/covidHubUtils",force=TRUE)
+library(lubridate)
+library(zoltr)
+# devtools::install_github("reichlab/zoltr",force=TRUE)
+library(igraph)
+library(gtools)
+library(gtable)
+library(gridExtra)
+library(grid)
+library(ggdendro)
+library(forecast)
+library(gridGraphics)
+knitr::opts_chunk$set(echo=FALSE, comment = FALSE, message=FALSE, 
+                      # fig.show= 'hold',fig.pos="H",table.placement="H",
+                      fig.show= 'hold',table.placement="H",
+                      warning =FALSE)
+```
+
+```{r}
+# source function
+source("./functions/distance_func_script.R")
+source("./functions/decomposition.R")
+source("./functions/plot_func.R")
+# set location and targets
+# melocs <- read.csv("./data/locations.csv")
+# locs <- melocs$location[1:52]
+target_horizon1 <- 1:4
+target_var <- c("inc death")
+# death_dat_gen <- read.csv("./data/formatted_df_gen.csv") %>%
+#   dplyr::mutate(target_end_date = as.Date(target_end_date),
+#                 forecast_date = as.Date(forecast_date,"1970-01-01"),
+#                 ) 
+# metadata
+s_list <- c("CEID.Walk","RobertWalraven.ESG","Microsoft.DeepSTIA",
+            "USC.SI_kJalpha","LANL.GrowthRate","MUNI.ARIMA","JHU_CSSE.DECOM")
+e_list <- c("CU.select", "Karlen.pypm", "UA.EpiCovDA", "CovidAnalytics.DELPHI",
+            "BPagano.RtDriven","UMass.MechBayes","IEM_MED.CovidProject")
+# model_names <- str_replace(model_n,"\\.","-")
+# test
+dist_test_norepeat <- read.csv("./data/analysis_data/norepeat_distance_test.csv") %>%
+  dplyr::mutate(target_end_date = as.Date(target_end_date),
+                location = ifelse(location>=10,as.character(location),paste0("0",as.character(location)))) 
+perm_stats2 <- read.csv("./data/analysis_data/perm_stats2.csv") 
+# dist_test <- read.csv("./data/analysis_data/distance_test.csv") %>%
+#   dplyr::filter(target_end_date <= max(dist_gen_norepeat$target_end_date),
+#                 target_end_date >=  min(dist_gen_norepeat$target_end_date)) 
+q_set <- round(c(0.010,0.025,seq(0.050,0.950,0.050),0.975,0.990), digits = 3)
+```
+
+
+# Similarity by type during the winter 2020/2021 wave
+
+The Delta wave in the fall? 8 weeks of increasing with not more than 2 negative growths, averaging more than 200 deaths during 2021-06-15 and 2021-11-01 period (this is location criteria). Take overall submissions (total submission during overall during the period in the overall analysis) into account to indicate some commitment - at 70 percents of the max of 344 sub in each location during may 2 2020 and 2021 dec 18 - excluding baseline model. 
+
+```{r p1, fig.height=10}
+# get truth
+truth_prefiltered <- read.csv("./data/truth_prefiltered.csv") %>%
+   dplyr::mutate(target_end_date = as.Date(target_end_date),
+                 value = ifelse(value<0,0,value)) %>%
+   dplyr::filter(target_variable=="inc death",
+                 target_end_date >= "2021-06-15",
+                 target_end_date <= "2021-11-01",
+                 location!="US")  %>%
+  group_by(location) %>%
+  arrange(target_end_date) %>%
+  dplyr::mutate(cum_death = cumsum(value),
+                growth=((value-lag(value))/lag(value))*100,
+                avg=mean(value),
+                gmean = mean(growth,na.rm=TRUE)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(avg>=100,
+                gmean >=10,
+                !(location %in% c("39","01","04","05","06","32","40","29",
+                                  "17","26","21","42"))
+                ) 
+# second filter
+truth_prefiltered2 <- truth_prefiltered %>% 
+  dplyr::mutate(up_start=ifelse(location%in%c("47","48"),"2021-08-07",
+                                ifelse(location%in%c("12"),"2021-07-17",
+                                       ifelse(location%in%c("22"), "2021-07-10",
+                                       ifelse(location%in%c("28"), "2021-07-24",
+                                       ifelse(location%in%c("51","45"), "2021-08-14",
+                                       ifelse(location%in%c("42"), "2021-09-04",
+                                       "2021-07-31")))))
+                                ),
+                up_end=ifelse(location%in%c("47","48"),"2021-09-25",
+                              ifelse(location%in%c("12"),"2021-09-04",
+                                     ifelse(location%in%c("22"),"2021-08-28",
+                                     ifelse(location%in%c("28"),"2021-09-11",
+                                     ifelse(location%in%c("51","45"),"2021-10-02",
+                                      ifelse(location%in%c("42"),"2021-10-23",
+                                     "2021-09-18")))))
+                              )
+                )
+# get date_dat
+date_data <- truth_prefiltered2 %>%
+  dplyr::select(location,up_start,up_end) %>%
+  distinct()
+tlocs <- unique(truth_prefiltered2$location)
+# plot
+loc1 <- tlocs[1:5]
+loc2 <- tlocs[6:10]
+truth_prefiltered2 %>%
+   dplyr::filter(target_end_date >= "2021-06-15",
+                 target_end_date < "2021-11-01",
+                 location %in% loc2
+                 ) %>%
+  ggplot(aes(x=as.Date(target_end_date),y=value)) +
+  geom_line()+
+  geom_rect(aes(xmin=as.Date(up_start),xmax=as.Date(up_end), ymin=0,ymax=Inf),fill="purple",alpha=0.02)+
+  facet_wrap(~location,scales = "free",ncol=2)+
+  theme_bw()
+```
+
+
+```{r}
+test_norep_phase <- dist_test_norepeat %>%
+  dplyr::mutate(forecast_date=(target_end_date-(7*horizon))+2)
+# mods <- colnames(death_dat_test)[-c(1:7)]
+# plot models forecast on these dates by location
+locn <- truth_prefiltered %>%
+  dplyr::select(location,location_name)
+phased <- type_dis_phase(test_norep_phase,s_list,e_list) %>%
+  dplyr::left_join(locn, by="location")
+  
+## date 2
+#comb_phased <- rbind(phased,phased_p)
+# check <-  phased  %>% dplyr::filter(pair_type=="Within-group") %>%
+#       dplyr::mutate(type=ifelse(type.x=="Mechanistic", "Mechanistic","Statistical")) %>%
+#       dplyr::group_by(type,horizon) %>%
+#       dplyr::mutate(mcd =mean(approx_cd)) %>%
+#       dplyr::ungroup() %>%
+#       dplyr::select(type,mcd,horizon) %>%
+#       dplyr::distinct()
+# check11 <- sum(phased$approx_cd[phased$pair_type=="Within-group" & phased$horizon==2])
+# check21 <- sum(phased$approx_cd[phased$pair_type=="Between-group" & phased$horizon==2])
+# check21/check11
+```
+
+## Boxplots of approx. CDs by categories
+
+```{r box1,fig.align='center',out.width='100%',out.height='100%',fig.width=8.2,fig.height=7} 
+# plot models forecast on these dates by location (dist from baseline)
+box_type_phase2(phased,"(a) Within-group approx. CDs by model types")
+```
+
+```{r box2,fig.align='center',out.width='100%',out.height='90%',fig.width=8.2,fig.height=7}
+# plot models forecast on these dates by location (dist from baseline)
+#box_type_phase3(phased,"Within- and between-group approx. CDs")
+box_type_phase_nw(phased,"(b) Within- and between-group approx. CDs")
+```
+
+## Distribution of Test Statistics
+
+Now that dates are irrelevant, more emphasis on locations. 
+
+```{r}
+perm_stats <-perm_stats2 %>%
+  pivot_longer(c(h2,h4),names_to = "horizon",values_to = "stats") %>%
+  dplyr::mutate(real=ifelse(horizon=="h2",h2_real[1],h4_real[1]))
+```
+
+```{r}
+ggplot(perm_stats,aes(x=stats)) +
+  geom_histogram(bins=20,color="black",fill="#009999") +
+  facet_wrap(~horizon,labeller=as_labeller(c('h2'='2 week ahead','h4'='4 week ahead')))+
+  # geom_vline(xintercept = perm_stats2$h2_real[1])+
+  geom_vline(data=filter(perm_stats, horizon=="h2"),aes(xintercept = 0.9766748),color="darkred",size=0.75)+
+  geom_vline(data=filter(perm_stats, horizon=="h4"),aes(xintercept =1.002328),color="darkred",size=0.75)+
+  # annotate("text", label = paste0(c(expression("R"["CD"]),round(perm_stats$h2_real[1],2))),
+  #          x = 1.12, y = 320, size = 4, colour = "black")+
+  xlab("Null pseudo F statistic")+
+  theme_bw()
+# ggplot(perm_stats2) +
+#   geom_histogram(aes(x=h4),bins=15,fill="darkgreen") +
+#   geom_vline(xintercept = perm_stats2$h4_real[1])+
+#   # annotate("text", label = paste0(c(expression("R"["CD"]),round(perm_stats$h4_real[1],2))),
+#   #          x = 1.18, y = 320, size = 4, colour = "black")+
+#   xlab("Test statistic")+
+#   theme_bw()
+```
+
+# ```{r}
+# ggplot(perm_statsl) +
+#   geom_histogram(aes(x=h2),bins=20,fill="darkgreen") +
+#   geom_vline(xintercept = perm_statsl$h2_real[1])+
+#   # annotate("text", label = paste0(c(expression("R"["CD"]),round(perm_stats$h2_real[1],2))),
+#   #          x = 1.12, y = 320, size = 4, colour = "black")+
+#   xlab("Test statistic")+
+#   theme_bw()
+# ggplot(perm_statsl) +
+#   geom_histogram(aes(x=h4),bins=20,fill="darkgreen") +
+#   geom_vline(xintercept = perm_statsl$h4_real[1])+
+#   # annotate("text", label = paste0(c(expression("R"["CD"]),round(perm_stats$h4_real[1],2))),
+#   #          x = 1.18, y = 320, size = 4, colour = "black")+
+#   xlab("Test statistic")+
+#   theme_bw()
+# ```
+
+```{r}
+p1 <- sum(perm_stats2$h2>=0.9766748)/3432
+print(paste0("p-value for 2 wk horizon is ",p1))
+p2 <-  sum(perm_stats2$h4>=1.002328)/3432
+print(paste0("p-value for 4 wk horizon is ",p2))
+
+# p1l <- sum(perm_statsl$h2>=1.031853)/3432
+# print(paste0("p-value for 2 wk horizon is ",p1l))
+# p2l <-  sum(perm_statsl$h4>=1.030818)/3432
+# print(paste0("p-value for 4 wk horizon is ",p2l))
+# 
+# p1m <- sum(c(perm_stats2$h2)>1.202278)/3432
+# print(paste0("median - p-value for 2 wk horizon is ",p1m))
+# p2m <-  sum(perm_stats2$h4>1.191362)/3432
+# print(paste0("median - p-value for 4 wk horizon is ",p2m))
+```
+

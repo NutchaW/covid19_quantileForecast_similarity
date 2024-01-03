@@ -1,0 +1,432 @@
+---
+title: "COVID-19 Forecast Similarity Analysis"
+author: "Nutcha Wattanachit, Johannes Bracher, Evan Ray, Nick Reich"
+date: "10/10/2022"
+header-includes:
+   - \usepackage{tabularx}
+   - \usepackage{hyperref}
+   - \usepackage{wrapfig}
+   - \usepackage{float}
+   - \usepackage{colortbl}
+   - \usepackage{pdflscape}
+   - \usepackage{tabu}
+   - \usepackage{xcolor}
+output:
+  pdf_document:
+        latex_engine: xelatex
+        fig_caption: yes
+        keep_tex: true 
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(energy)
+library(knitr)
+library(data.table)
+library(covidHubUtils)
+library(RColorBrewer)
+#devtools::install_github("reichlab/covidHubUtils",force=TRUE)
+library(lubridate)
+library(zoltr)
+# devtools::install_github("reichlab/zoltr",force=TRUE)
+library(igraph)
+library(gtools)
+library(gtable)
+library(gridExtra)
+library(grid)
+library(ggdendro)
+library(forecast)
+library(gridGraphics)
+knitr::opts_chunk$set(echo=FALSE, comment = FALSE, message=FALSE, 
+                      # fig.show= 'hold',fig.pos="H",table.placement="H",
+                      fig.show= 'hold',table.placement="H",
+                      warning =FALSE)
+```
+
+```{r}
+load("./data/analysis_data/ccf.RData")
+# source function
+source("./functions/distance_func_script.R")
+source("./functions/decomposition.R")
+source("./functions/plot_func.R")
+# set location and targets
+melocs <- read.csv("./data/locations.csv")
+locs <- melocs$location[1:52]
+target_horizon1 <- 1:4
+target_var <- c("inc death")
+# get death forecast data
+# changemm_dat <- read.csv("./data/change_moment_dat.csv") %>%
+#   dplyr::mutate(target_end_date = as.Date(target_end_date),
+#                 location = ifelse(location>=10,as.character(location),paste0("0",as.character(location))))
+#death_dat_test_long <- read.csv("./data/long_df_test.csv") 
+# get test data for all dates plot
+# death_dat_test <- read.csv("./data/formatted_df_test_fin.csv") %>%
+#   dplyr::mutate(target_end_date = as.Date(target_end_date,"1970-01-01"),
+#                 forecast_date = as.Date(forecast_date,"1970-01-01"),
+#                 location = ifelse(location>=10,as.character(location),paste0("0",as.character(location))))
+
+death_dat_gen <- read.csv("./data/formatted_df_gen.csv") %>%
+  dplyr::mutate(target_end_date = as.Date(target_end_date),
+                forecast_date = as.Date(forecast_date,"1970-01-01"),
+                ) 
+dist_gen_rep <- read.csv("./data/analysis_data/dist_gen_rep.csv") 
+# model_n <- str_replace(colnames(death_dat_test[,c(8:(ncol(death_dat_test)))]),"\\.","-")
+
+# get metadata
+# metadat <- read.csv("./data/metadata.csv") %>%
+#   dplyr::filter(model_abbr %in% model_n)
+# write.csv(metadat,file = "./data/metadata_test.csv")
+# metadat2 <- read.csv("./data/metadata.csv") %>%
+#   dplyr::filter(model_abbr %in% model_n2)
+# write.csv(metadat2,file = "./data/metadata_test2.csv")
+# metadata
+s_list <- c("CMU.TimeSeries","CEID.Walk","JHU_CSSE.DECOM","COVIDhub.baseline",
+            "RobertWalraven.ESG","MIT_CritData.GBCF","DDS.NBDS")
+e_list <- c("CU.select", "Karlen.pypm", "UA.EpiCovDA", "Covid19Sim.Simulator",
+            "UMass.MechBayes","CovidAnalytics.DELPHI","BPagano.RtDriven")
+# model_names <- str_replace(model_n,"\\.","-")
+
+
+# meta <- metadat %>%
+#   dplyr::mutate(type=ifelse(model_abbr %in% s_list,"non_SIR","SIR"),
+#                 model_abbr=str_replace(model_abbr,"\\-",".")) 
+# types <- meta$type
+# meta_p <- meta %>%
+#   dplyr::select(model_abbr,type) 
+
+# read non-repeat distances 
+dist_gen_norepeat <- read.csv("./data/analysis_data/norepeat_distance_all_l.csv") %>%
+  dplyr::mutate(target_end_date = as.Date(target_end_date),
+                location = ifelse(nchar(location)==3,paste0("0",as.numeric(location)),location)) 
+# # other measures
+# oth_measure_norep <- read.csv("./data/analysis_data/oth_norepeat_distance_all_l.csv") %>%
+#   dplyr::mutate(target_end_date = as.Date(target_end_date),
+#                 location = ifelse(nchar(location)==3,paste0("0",as.numeric(location)),location))
+# test
+dist_test_norepeat <- read.csv("./data/analysis_data/norepeat_distance_test.csv") %>%
+  dplyr::mutate(target_end_date = as.Date(target_end_date),
+                location = ifelse(location>=10,as.character(location),paste0("0",as.character(location)))) 
+perm_stats <- read.csv("./data/analysis_data/perm_stats.csv") 
+perm_stats2 <- read.csv("./data/analysis_data/perm_stats2.csv") 
+# dist_test <- read.csv("./data/analysis_data/distance_test.csv") %>%
+#   dplyr::mutate(target_end_date = as.Date(target_end_date,"1970-01-01"),
+#                 location = ifelse(location>=10,as.character(location),paste0("0",as.character(location)))) 
+
+# make new gen type set
+# name_set <- c("BPagano.RtDriven", "CovidAnalytics.DELPHI", "COVIDhub_CDC.ensemble", 
+#               "COVIDhub.4_week.ensemble","COVIDhub.baseline", "CU.select", 
+#               "DDS.NBDS", "JHUAPL.Bucky", "Karlen.pypm", "MOBS.GLEAM_COVID",
+#               "RobertWalraven.ESG", "SteveMcConnell.CovidComplete", "UCSD_NEU.DeepGLEAM", 
+#               "UMass.MechBayes","USC.SI_kJalpha" )
+# dist_gen_norep_filtered <- dist_gen_norepeat %>%
+#   dplyr::filter(!(location %in% c("US","15")),
+#                 target_end_date >= "2020-11-01",
+#                 target_end_date <= "2021-12-31",
+#                (model_1 %in% name_set & model_2 %in% name_set)) 
+# dist_gen_filtered <- read.csv("./data/analysis_data/distance_all_l.csv") %>%
+#   dplyr::mutate(target_end_date = as.Date(target_end_date),
+#                 location = ifelse(nchar(location)==3,paste0("0",as.numeric(location)),location)) %>%
+#   dplyr::filter(!(location %in% c("US","15")),
+#                 target_end_date >= "2020-11-01",
+#                 target_end_date <= "2021-12-31",
+#                (model_1 %in% name_set & model_2 %in% name_set)) 
+
+# # date 2
+# locs_short <- unique(death_dat_test$location)
+# locs_short2 <- unique(dist_test_norepeat1$location)
+# decomp data
+# decomp <- read.csv("./data/analysis_data/decomp_data_filtered.csv") 
+# truth
+truth_death <- read.csv("./data/truth_prefiltered.csv") %>%
+  dplyr::mutate(value=ifelse(value<0,0,value),
+                target_end_date = as.Date(target_end_date,"1970-01-01")) %>%
+  dplyr::filter(geo_type=="state",
+                location %in% locs) %>%
+  dplyr::filter(target_variable=="inc death") 
+# %>%
+#   dplyr::filter(target_end_date <= max(dist_gen_norepeat$target_end_date),
+#                 target_end_date >=  min(dist_gen_norepeat$target_end_date)) 
+q_set <- unique(death_dat_gen$quantile) 
+```
+
+<!-- # General Figure 1 -->
+
+<!-- # ```{r concept_t,fig.align='center',fig.width=8,fig.height=4,cache=TRUE,fig.cap="COVID-19 deaths forecasts (left) and all predictive quantiles (right)"} -->
+<!-- # concept_plot0(c("06"), c("2020-07-06","2020-11-16","2021-04-05","2021-08-23"), -->
+<!-- #               "COVIDhub-4_week_ensemble") -->
+<!-- # ``` -->
+
+
+# Concept: Examples of forecasts and Cramer distances - CA
+
+The plots show the distances between the ensemble and UMass-MechBayes at two different forecast dates. We can see that lower approximated CD values indicates more similarity between the two forecasts - as the plots of the predictive quantiles on forecast date 2021-04-05 shows a lot of overlap. On the other hand, the plots of the predictive quantiles on forecast date 2021-08-02 shows less overlap accompanying by higher approximated CD values.
+
+```{r concept_ca,fig.align='center',fig.width=8,fig.height=9,fig.cap="COVID-19 deaths forecasts (left) and all predictive quantiles (right)"}
+concept_plot_new(c("06"), c("2020-12-07","2021-07-26"),c("COVIDhub-4_week_ensemble", "UMass-MechBayes"),death_dat_gen)
+```
+
+## Overall Similarities
+
+* Targets: all wk ahead inc deaths
+* End dates: May 02 2020-Dec 18 2021
+* Model: The same set as in the evaluation paper (28 models) that have 4 horizons on each submission and that have more than 10000k submissions 
+* Probability levels: All
+* Locations: National and states (excluding US territory and DC), so 51 locations 
+
+```{r}
+# filter out models with really low submission for each low location during specified time period
+locs_set <- locs[!(locs=="11")] 
+# calculate every over all week location make dendro plot
+# model_set <- c("CEID.Walk","COVIDhub.baseline","UMich.RidgeTfReg","RobertWalraven.ESG","DDS.NBDS",
+#                "UCLA.SuEIR","PSI.DRAFT","CU.select","UA.EpiCovDA","CovidAnalytics.DELPHI","JHU_IDD.CovidSP",
+#                "JHUAPL.Bucky","COVIDhub.4_week_ensemble","CMU.TimeSeries","JHU_CSSE.DECOM","GT.DeepCOVID",
+#                "OliverWyman.Navigator","MOBS.GLEAM_COVID","UCSD_NEU.DeepGLEAM","LANL.GrowthRate",
+#                "UMass.MechBayes","Karlen.pypm","SteveMcConnell.CovidComplete", "BPagano.RtDriven",              
+#                "IHME.CurveFit","Covid19Sim.Simulator")
+
+model_set <- c("COVIDhub.4_week_ensemble", "COVIDhub.baseline", "CU.select","CovidAnalytics.DELPHI" ,"GT.DeepCOVID",
+               "JHUAPL.Bucky","JHU_IDD.CovidSP", "Karlen.pypm","MOBS.GLEAM_COVID","PSI.DRAFT" ,"RobertWalraven.ESG",
+               "SteveMcConnell.CovidComplete","UA.EpiCovDA","UCSD_NEU.DeepGLEAM","UMass.MechBayes")
+# based on dendro
+order_name <- c("JHU_IDD.CovidSP","CovidAnalytics.DELPHI","COVIDhub.4_week_ensemble","MOBS.GLEAM_COVID",
+                "UCSD_NEU.DeepGLEAM","GT.DeepCOVID","COVIDhub.baseline","RobertWalraven.ESG",
+                "UMass.MechBayes","Karlen.pypm","SteveMcConnell.CovidComplete","CU.select",
+                "UA.EpiCovDA","JHUAPL.Bucky","PSI.DRAFT")
+
+# exclude "epiforecasts.ensemble1" for some severe forecasting issue
+# average over all horizons
+dist_gen_rep_states <- dist_gen_rep %>%
+  dplyr::filter(location!="US",
+                model_1 %in% model_set,
+                model_2 %in% model_set) %>%
+  dplyr::mutate(model_1=gsub("\\.", "-", model_1),
+                model_2=gsub("\\.", "-", model_2))
+dist_state <- cd_matrix(dist_gen_rep_states)
+# 
+# dist_gen_norepeat %>%
+#   dplyr::filter(target_end_date=="2021-06-05",
+#                 location=="01",
+#                 model_1 %in% model_set,
+#                 model_2 %in% model_set,
+#                 horizon==1) %>%
+#   ggplot() +
+#   geom_histogram(aes(x=approx_cd)) 
+```
+
+```{r dendro}
+dendro_plot(dist_state)
+```
+
+```{r,fig.height=7}
+distance_heatmap2(dist_gen_rep_states,gsub("\\.", "-", order_name))
+```
+
+#  Distance/dissimilarity as a signal/leading indicator of an increase in incident deaths
+
+Cross-correlations of median approx. CDs and incident deaths are calculated for 2 "up" periods, the winter 2020 and the fall 2021, are calculated for 34 selected states based on the criteria below. The maximum lags and leads are 9 weeks before and after each target dates during 9 weeks of up periods.
+
+## Forecast inclusion criteria
+
+* Targets: 2 and 4 wk ahead inc death
+* Target End Dates: Jan 2021-Jan 2022
+* Model: all models submitted on a particular date
+* Probability levels: All
+* Locations: All 34 states (continental US) except HI, AK and DC. We also exclude DE, ME,MT,OK,OR,VT for low or highly variable incidents. We also exclude AZ, CA, CT, MD, MO, NE, NJ, RI since they have only one peak. 
+
+
+## Cross correlations
+
+<!-- Over the course of the COVID-19 pandemic from October 2020 through July 2022 in both Massachusetts -->
+<!-- and California, finalized case data aggregated by test date or report date did not show -->
+<!-- strong evidence of being a leading or lagging indicator for hospitalizations. The raw daily case counts -->
+<!-- for all data streams showed substantial variability (Figure 1A&C). Trailing seven-day averages of final -->
+<!-- data showed that trends in cases aggregated by test-date led trends of cases aggregated by report-date, -->
+<!-- as would be expected due to the lag of typically at least one day between a test being performed and -->
+<!-- being reported by a surveillance system. -->
+<!-- However the degree to which either of these signals led hospitalizations appeared to vary across the -->
+<!-- pandemic. For example, using a smoothed measure of the relative one week change to indicate whether -->
+<!-- a signal was increasing or decreasing, hospitalizations in Massachusetts appeared to increase after both -->
+<!-- case signals in the Alpha wave in spring 2021. Nonetheless, in summer 2022, the hospitalizations started -->
+<!-- to increase before cases (Figure 1B). In California, hospitalizations appeared to increase before cases -->
+<!-- in October 2021, but only increased several weeks after rises in cases were observed in spring 2022 -->
+<!-- (Figure 1D). -->
+<!-- 10 -->
+
+The distributions of cross-correlations across the two up periods of winter 2020/2021 and fall 2021 waves (and 9 weeks before the first week and 9 after the last week) show that there is no evidence that the median CDs of 2 week ahead forecasts consistently lead or lag the increase in incident deaths, however there is some evidence that the median CDs of 4 week ahead forecasts lead the increase in incident deaths.
+
+```{r}
+locs_ccf <- all_locs
+# date 2
+horiz2 <- ccf_extract(ccf_list2,2, locs_ccf)
+horiz4 <- ccf_extract(ccf_list4,4, locs_ccf)
+
+corr_list2 <- rbind(horiz2,horiz4)
+
+# date 1
+
+horiz2 <- ccf_extract(ccf_list2_ex,2, locs_ccf)
+horiz4 <- ccf_extract(ccf_list4_ex,4, locs_ccf)
+
+corr_list1 <- rbind(horiz2,horiz4)
+# plot
+# date 2
+corr_max2 <- corr_list2 %>%
+  dplyr::group_by(horizon,location) %>%
+  dplyr::filter(corr==max(abs(corr))) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(-"p_val") %>%
+  dplyr::mutate(time = "Fall 2021")
+
+# date 1
+# any max
+corr_max1 <- corr_list1 %>%
+  dplyr::group_by(horizon,location) %>%
+  dplyr::filter(corr==max(abs(corr))) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(-"p_val") %>%
+  dplyr::mutate(time = "Winter 2020/21")
+corr_max <- rbind(corr_max1,corr_max2)
+corr_max$lag <- factor(corr_max$lag, levels=unique(sort(as.numeric(corr_max$lag))))
+```
+
+```{r corex,fig.align='center',out.width='100%',out.height='100%',fig.cap="Example CCF plots for 2 and 4 wk ahead horizons."}
+# par(mfrow = c(2, 2))
+# plot(ccf_list2_ex[[24]], main = paste0("2 wk ahead - 12,\n Winter 2020/21"),ylab="",
+#      cex.lab=0.7, cex.axis=0.7, cex.main=0.1) 
+# plot(ccf_list4_ex[[24]], main = paste0("4 wk ahead - 12,\n Winter 2020/21"),ylab="",
+#      cex.lab=0.7, cex.axis=0.7, cex.main=0.1)
+# plot(ccf_list2[[24]], main = paste0("2 wk ahead - 12,\n Fall 2021"),ylab="",cex.lab=0.7, cex.axis=0.7, cex.main=0.05) 
+# plot(ccf_list4[[24]], main = paste0("4 wk ahead - 12,\n Fall 2021"),ylab="",cex.lab=0.7, cex.axis=0.7, cex.main=0.05)
+# plot for florida
+plot(ccf_list2_ex[[24]], ci=FALSE,main = paste0("2 week ahead,\n Winter 2020/21")) 
+plot(ccf_list4_ex[[24]],ci=FALSE,  main = paste0("4 week ahead,\n Winter 2020/21"))
+plot(ccf_list2[[24]],ci=FALSE,  main = paste0("2 week ahead,\n Fall 2021")) 
+plot(ccf_list4[[24]],ci=FALSE, main = paste0("4 week ahead,\n Fall 2021"))
+
+
+plot(ccf_list2_ex[[24]], ci=FALSE, main = paste0("2 week ahead,\n Winter 2020/21")) 
+plot(ccf_list4_ex[[24]],ci=FALSE,  main = paste0("4 week ahead,\n Winter 2020/21"))
+plot(ccf_list2[[24]],ci=FALSE,  main = paste0("2 week ahead,\n Fall 2021")) 
+plot(ccf_list4[[24]],ci=FALSE, main = paste0("4 week ahead,\n Fall 2021"))
+```
+
+```{r corm1,fig.align='center',out.width='100%',out.height='100%',fig.cap="Distribution of max. correlations by horizon and time"}
+ggplot(data = corr_max, aes(x = corr)) + 
+  geom_histogram(binwidth=0.045,
+                 aes(fill= factor(time, levels = c("Winter 2020/21", "Fall 2021"))),
+                 # aes(fill= time),
+                 alpha=0.7,show.legend = FALSE,position="identity") +
+  # facet_grid(time~horizon) +
+  facet_wrap(~horizon,labeller=as_labeller(c('2'='2 week ahead','4'='4 week ahead'))) +
+  scale_fill_brewer(palette="Dark2") +
+  theme_bw() +
+  theme(legend.title = element_text(""))+
+  xlab("Maximum Correlation")
+```
+
+```{r corm2,fig.align='center',out.width='100%',out.height='100%',fig.cap="Count of lags of max. cross-correlations"}
+ggplot(data = corr_max, aes(x = lag)) + 
+  geom_bar(aes(fill=factor(time, levels = c("Winter 2020/21", "Fall 2021"))),position="stack") +
+  # facet_grid(time~horizon) +
+  facet_wrap(~horizon,labeller=as_labeller(c('2'='2 week ahead','4'='4 week ahead'))) +
+  scale_fill_brewer(palette="Dark2") +
+  theme_bw() +
+  theme(legend.title = element_blank(),
+        legend.position="bottom")+
+  xlab("Lag")
+```
+
+
+<!-- # CD vs Other Dissimilarity Measures  -->
+
+<!-- To explore the empirical agreement between different similarity measures, we calculated median, 50\% and 80\% prediction interval width differences, and cramer distances for all pairs of forecasts submitted between May 2020 to Dec 2021. Then, we averaged those measures over one- through four-week-ahead horizon, locations, and target end dates. Outliers are removed. -->
+
+<!-- Average CD seems to agree the most to average median difference ($r=0.87$), compared to its agreement with 50\% and 80\% prediction interval width differences. -->
+
+<!-- ```{r} -->
+<!-- oth_measure_norep <- oth_measure_norep %>% -->
+<!--   dplyr::left_join(dist_gen_norepeat, by=c("model_1","model_2", "location","target_end_date","horizon")) %>% -->
+<!--   dplyr::select(model_1,model_2,location,target_end_date,med_diff,approx_cd,ci50_diff,ci80_diff) %>% -->
+<!--   dplyr::group_by(model_1,model_2,location,target_end_date) %>% -->
+<!--   dplyr::mutate(avg_med_diff = mean(med_diff), -->
+<!--                 avg_approx_cd = mean(approx_cd), -->
+<!--                 avg_ci50_diff = mean(ci50_diff), -->
+<!--                 avg_ci80_diff = mean(ci80_diff)) %>% -->
+<!--   dplyr::ungroup() %>% -->
+<!--   dplyr::select(-c("approx_cd","ci50_diff","ci80_diff","med_diff")) %>% -->
+<!--   dplyr::distinct() -->
+
+<!-- oth_measure_norep_avg <- oth_measure_norep %>% -->
+<!--   dplyr::group_by(model_1,model_2) %>% -->
+<!--   dplyr::mutate(avg_med = mean(avg_med_diff), -->
+<!--                 avg_cd = mean(avg_approx_cd), -->
+<!--                 avg_ci50 = mean(avg_ci50_diff), -->
+<!--                 avg_ci80 = mean(avg_ci80_diff)) %>% -->
+<!--   dplyr::ungroup() %>% -->
+<!--   # maybe take out outliers -->
+<!--   dplyr::mutate(outl_med = 1.5*IQR(avg_med), -->
+<!--                 outl_cd = 1.5*IQR(avg_cd), -->
+<!--                 outl_50 = 1.5*IQR(avg_ci50), -->
+<!--                 outl_80 = 1.5*IQR(avg_ci80)) %>% -->
+<!--   dplyr::filter(avg_med < outl_med, -->
+<!--                 avg_cd < outl_cd, -->
+<!--                 avg_ci50 < outl_50, -->
+<!--                 avg_ci80 < outl_80) %>% -->
+<!--   dplyr::select(-c("avg_approx_cd","avg_ci50_diff","avg_ci80_diff", -->
+<!--                    "avg_med_diff","location","target_end_date")) %>% -->
+<!--   dplyr::distinct() -->
+
+<!-- # maybe take out outliers -->
+<!-- # oth_measure_norep_noout <- oth_measure_norep %>% -->
+<!-- #   dplyr::group_by(model_1,model_2,location,target_end_date) %>% -->
+<!-- #   dplyr::mutate() %>% -->
+<!-- #   dplyr::ungroup() %>% -->
+
+
+<!-- ``` -->
+
+<!-- ```{r,fig.cap="Comparison of Pairwise CDs and other metrics of all models during May 2020-Dec 2021"} -->
+
+<!-- par(mfrow = c(2, 2)) -->
+<!-- grob1 = grobTree(textGrob(paste("Correlation : ",  -->
+<!--                                 round( -->
+<!--                                   cor(oth_measure_norep_avg$avg_med, oth_measure_norep_avg$avg_cd),  -->
+<!--                                   4) ), -->
+<!--                           x = 0.63, y = 0.97, hjust = 0,  -->
+<!--                           gp = gpar(col = "red", fontsize = 11, fontface = "bold"))) -->
+<!-- grob2 = grobTree(textGrob(paste("Correlation : ",  -->
+<!--                                 round( -->
+<!--                                   cor(oth_measure_norep_avg$avg_ci50, oth_measure_norep_avg$avg_cd),  -->
+<!--                                   4) ), -->
+<!--                           x = 0.63, y = 0.97, hjust = 0,  -->
+<!--                           gp = gpar(col = "red", fontsize = 11, fontface = "bold"))) -->
+<!-- grob3 = grobTree(textGrob(paste("Correlation : ",  -->
+<!--                                 round( -->
+<!--                                   cor(oth_measure_norep_avg$avg_ci80, oth_measure_norep_avg$avg_cd),  -->
+<!--                                   4) ), -->
+<!--                           x = 0.63, y = 0.97, hjust = 0,  -->
+<!--                           gp = gpar(col = "red", fontsize = 11, fontface = "bold"))) -->
+<!-- ggplot(oth_measure_norep_avg,  -->
+<!--        aes(x=avg_med, y=avg_cd)) +  -->
+<!--   geom_point(alpha=0.4) +  -->
+<!--   #geom_smooth(method=lm, se=FALSE) +  -->
+<!--   annotation_custom(grob1) +  -->
+<!--   theme_bw() -->
+<!-- ggplot(oth_measure_norep_avg,  -->
+<!--        aes(x=avg_ci50, y=avg_cd)) +  -->
+<!--   geom_point(alpha=0.4) +  -->
+<!--   #geom_smooth(method=lm, se=FALSE) +  -->
+<!--   annotation_custom(grob2) +  -->
+<!--   theme_bw() -->
+<!-- ggplot(oth_measure_norep_avg,  -->
+<!--        aes(x=avg_ci80, y=avg_cd)) +  -->
+<!--   geom_point(alpha=0.4) +  -->
+<!--   #geom_smooth(method=lm, se=FALSE) +  -->
+<!--   annotation_custom(grob3) +  -->
+<!--   theme_bw() -->
+<!-- #plot(oth_measure_norep$avg_med_diff, oth_measure_norep$avg_med_diff) -->
+<!-- ``` -->
+
+

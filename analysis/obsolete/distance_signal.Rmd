@@ -1,0 +1,262 @@
+---
+title: "Distance as a signal"
+author: "Nutcha Wattanachit, Johannes Bracher, Evan Ray, Nick Reich"
+date: "05/13/2022"
+header-includes:
+   - \usepackage{tabularx}
+   - \usepackage{hyperref}
+   - \usepackage{wrapfig}
+   - \usepackage{float}
+   - \usepackage{colortbl}
+   - \usepackage{pdflscape}
+   - \usepackage{tabu}
+   - \usepackage{xcolor}
+output:
+  pdf_document:
+        latex_engine: xelatex
+        fig_caption: yes
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(energy)
+library(knitr)
+library(data.table)
+library(covidHubUtils)
+library(RColorBrewer)
+library(genlasso)
+#devtools::install_github("reichlab/covidHubUtils",force=TRUE)
+library(epiprocess)
+#devtools::install_github("cmu-delphi/epiprocess",force=TRUE)
+library(lubridate)
+library(zoltr)
+library(igraph)
+library(gtools)
+library(gtable)
+library(gridExtra)
+library(grid)
+library(ggdendro)
+library(gridGraphics)
+knitr::opts_chunk$set(echo=FALSE, comment = FALSE, message=FALSE, 
+                      fig.show= 'hold',fig.pos="H",table.placement="H",
+                      warning =FALSE)
+```
+
+   
+```{r}
+# source function
+source("./functions/distance_func_script.R")
+source("./functions/plot_func.R")
+# set location and targets
+melocs <- read.csv("./data/locations.csv")
+locs <- melocs$location[1:52]
+target_horizon1 <- 1:4
+target_var <- c("inc death")
+
+# read distances
+dist_gen_norepeat <- read.csv("./data/analysis_data/norepeat_distance_all_l.csv") %>%
+  dplyr::mutate(target_end_date = as.Date(target_end_date),
+                location = ifelse(nchar(location)==3,paste0("0",as.numeric(location)),location)) 
+# truth
+truth_death <- read.csv("./data/truth_prefiltered.csv") %>%
+  dplyr::mutate(value=ifelse(value<0,0,value),
+                target_end_date = as.Date(target_end_date)) %>%
+  dplyr::filter(geo_type=="state",
+                location %in% locs) %>%
+  dplyr::filter(target_variable=="inc death") %>%
+  dplyr::filter(target_end_date <= max(dist_gen_norepeat$target_end_date),
+                target_end_date >=  min(dist_gen_norepeat$target_end_date)) 
+```
+
+
+```{r,cache=TRUE}
+scale_full <- dist_gen_norepeat %>%
+  dplyr::mutate(date = (as.Date(target_end_date)+2)-(7*horizon),
+                location=as.character(location),
+                horizon=as.character(horizon)) %>%
+  dplyr::filter(date >= "2020-12-21",
+                target_end_date <= "2021-12-31") %>%
+  dplyr::group_by(date,location) %>%
+  dplyr::filter(n_distinct(horizon)==4) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(approx_cd,horizon,location,date)
+scale_w_na <- scale_full %>%
+  dplyr::group_by(location,date,horizon) %>%
+  dplyr::mutate(approx_cd=filter_lims(approx_cd)) %>%
+  dplyr::ungroup() 
+# add truth death
+truth_death_hr <- truth_death  %>%
+  dplyr::mutate(approx_cd=value,
+                date=target_end_date+2,
+                horizon="incident death") %>%
+  dplyr::filter(target_end_date >= "2020-12-19",
+                target_end_date <= "2021-11-29") %>%
+  dplyr::select(location,date,approx_cd,horizon)
+truth_death_hr <- truth_death_hr[,c(3,4,1,2)]
+scale_boxp <- rbind(scale_w_na,truth_death_hr) 
+```
+
+
+
+```{r, cache=TRUE}
+# all plots
+x <-rbind(truth_death_hr %>%
+          dplyr::filter(horizon=="incident death") %>% 
+          dplyr::mutate(horizon="truth",type="truth"),
+          scale_full %>%
+          dplyr::group_by(horizon,location,date) %>%
+          dplyr::mutate(approx_cd=median(approx_cd),type="median CD") %>%
+          dplyr::ungroup() %>%
+          distinct()
+          ) %>%
+  dplyr::filter(location !="US") %>%
+  dplyr::mutate(adjusted_value=ifelse(horizon=="truth" & approx_cd==0,1,approx_cd),
+                log_adjvalue=log(adjusted_value)) %>%
+  dplyr::group_by(location,date) %>%
+  dplyr::filter(n_distinct(horizon)==5) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(location,horizon,date) %>%
+  dplyr::group_by(horizon,location) %>%
+  dplyr::mutate(growth = (adjusted_value - lag(adjusted_value,1))/lag(adjusted_value,1),
+                log = (log_adjvalue - lag(log_adjvalue,1))/lag(log_adjvalue,1),
+                smooth_spline = growth_rate(date, adjusted_value, method = "smooth_spline"),
+                trend_filter = growth_rate(date, adjusted_value, method = "trend_filter"),
+                smooth_spline_log = growth_rate(date, adjusted_value, method = "smooth_spline",
+                                 log_scale = TRUE),
+                trend_filter_log = growth_rate(date, adjusted_value, method = "trend_filter",
+                                 log_scale = TRUE)) %>%
+  dplyr::ungroup() %>%
+  drop_na() %>%
+  pivot_longer(cols = c("approx_cd","growth","log","smooth_spline","trend_filter",
+                        "smooth_spline_log","trend_filter_log"),
+               names_to = c("Method"),
+               values_to = "value") %>%
+  dplyr::mutate(unit=ifelse(Method=="approx_cd","count","rate"))
+
+all_locs <- unique(x$location)
+locs_ord <- truth_death_hr %>%
+  dplyr::filter(location %in% all_locs) %>%
+  dplyr::group_by(location) %>%
+  dplyr::filter(approx_cd==max(approx_cd)) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(desc(approx_cd)) %>%
+  dplyr::select(location)  %>%
+  distinct() 
+locs_ord <- c(locs_ord)[[1]]
+
+x1 <- x %>%
+  dplyr::filter(unit=="count") 
+    
+x2 <- x %>%
+  dplyr::filter(unit!="count") %>%
+  dplyr::mutate(unit=ifelse(
+    Method %in% c("log","smooth_spline_log","trend_filter_log") & type=="median CD",
+    "log rate - CD", 
+    ifelse(
+    !Method %in% c("log","smooth_spline_log","trend_filter_log") & type=="median CD",
+    "rate - CD", 
+    ifelse(
+    Method %in% c("log","smooth_spline_log","trend_filter_log") & type!="median CD" & unit!="count",
+    "log rate - truth", "rate - truth")
+    )),
+    Method = ifelse(Method %in% c("smooth_spline_log","smooth_spline"),
+                    "smooth_spline",
+                    ifelse(Method %in% c("trend_filter_log","trend_filter"),
+                    "trend_filter",
+                    "no adjustment"))
+    )
+```
+
+# Plots - with no adjustment included (no preposcessing of rate)
+
+```{r}
+for(loc in locs_ord){
+  p1 <- x1 %>%
+    dplyr::filter(location == loc, 
+                  horizon %in% c(2,4,"truth")) %>%
+    ggplot() +
+    geom_line(aes(x = as.Date(date), y = value,col=horizon),na.rm = TRUE) +
+    scale_color_brewer(palette = "Dark2") +
+    facet_grid(type~location, scales = "free_y") +
+    scale_x_date(minor_breaks = "1 month", 
+                 breaks = "2 months", 
+                 date_labels = "%b %y") +
+    labs(x = "Date", y = "value") +
+    theme(legend.position = "bottom",
+          legend.key.size = unit(0.5, 'cm'), #change legend key size
+          # legend.key.height = unit(1, 'cm'), #change legend key height
+          # legend.key.width = unit(1, 'cm'), #change legend key width
+          legend.title = element_text(size=8), #change legend title font size
+          legend.text = element_text(size=5))
+  #print(p1)
+    p2 <- x2 %>%
+    dplyr::filter(location == loc,
+                  horizon %in% c(2,4,"truth")) %>%
+    ggplot() +
+    geom_line(aes(x = as.Date(date), y = value,linetype=Method,col=horizon),na.rm = TRUE) +
+    scale_color_brewer(palette = "Dark2") +
+    guides(color="none")+
+    facet_grid(unit~location, scales = "free_y") +
+    scale_x_date(minor_breaks = "1 month", 
+                 breaks = "2 months", 
+                 date_labels = "%b %y") +
+    labs(x = "Date", y = "") +
+    theme(legend.position = "bottom",
+          legend.box = "vertical",
+          legend.key.size = unit(0.5, 'cm'), #change legend key size
+          # legend.key.height = unit(1, 'cm'), #change legend key height
+          # legend.key.width = unit(1, 'cm'), #change legend key width
+          legend.title = element_text(size=8), #change legend title font size
+          legend.text = element_text(size=5))
+  #print(p2)
+  grid.arrange(p1,p2,ncol=2)
+}
+```
+
+# Plots - without no adjustment line 
+
+```{r}
+for(loc in locs_ord){
+  p3 <- x1 %>%
+    dplyr::filter(location == loc, 
+                  horizon %in% c(2,4,"truth")) %>%
+    ggplot() +
+    geom_line(aes(x = as.Date(date), y = value,col=horizon),na.rm = TRUE) +
+    scale_color_brewer(palette = "Dark2") +
+    facet_grid(type~location, scales = "free_y") +
+    scale_x_date(minor_breaks = "1 month", 
+                 breaks = "2 months", 
+                 date_labels = "%b %y") +
+    labs(x = "Date", y = "value") +
+    theme(legend.position = "bottom",
+          legend.key.size = unit(0.5, 'cm'), #change legend key size
+          # legend.key.height = unit(1, 'cm'), #change legend key height
+          # legend.key.width = unit(1, 'cm'), #change legend key width
+          legend.title = element_text(size=8), #change legend title font size
+          legend.text = element_text(size=5))
+  #print(p1)
+    p4 <- x2 %>%
+    dplyr::filter(location == loc,
+                  horizon %in% c(2,4,"truth"),
+                  Method !="no adjustment") %>%
+    ggplot() +
+    geom_line(aes(x = as.Date(date), y = value,linetype=Method,col=horizon),na.rm = TRUE) +
+    scale_color_brewer(palette = "Dark2") +
+    guides(color="none")+
+    facet_grid(unit~location, scales = "free_y") +
+    scale_x_date(minor_breaks = "1 month", 
+                 breaks = "2 months", 
+                 date_labels = "%b %y") +
+    labs(x = "Date", y = "") +
+    theme(legend.position = "bottom",
+          legend.box = "vertical",
+          legend.key.size = unit(0.5, 'cm'), #change legend key size
+          # legend.key.height = unit(1, 'cm'), #change legend key height
+          # legend.key.width = unit(1, 'cm'), #change legend key width
+          legend.title = element_text(size=8), #change legend title font size
+          legend.text = element_text(size=5))
+  #print(p2)
+  grid.arrange(p3,p4,ncol=2)
+}
+```
+
